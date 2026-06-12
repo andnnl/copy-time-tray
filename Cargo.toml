@@ -1,0 +1,22 @@
+[package]
+name = "copy-time-tray"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "copy-time-tray"
+path = "src/main.rs"
+
+[dependencies]
+libappindicator = "0.9"
+chrono = "0.4"
+arboard = "3.4"
+notify-rust = "4"
+gtk = "0.18"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
