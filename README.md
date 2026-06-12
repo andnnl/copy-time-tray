@@ -1,36 +1,36 @@
-# Copy Time Tray (Rust)
+# Copy Time Tray
 
-系统托盘时钟按钮，点击复制当前时间到剪贴板。Rust 版本，内存占用更低。
+跨平台系统托盘时钟，点击复制当前时间到剪贴板。
+
+支持 **Linux** 和 **Windows**。
 
 ## 功能
 
-- 🕐 状态栏显示时钟图标
+- 🕐 状态栏/任务栏托盘图标
 - 📋 右键菜单：复制当前时间到剪贴板
-- 📅 支持多种时间格式：
-  - 完整时间：`2026-06-12 10:30:45`
-  - 日期：`2026-06-12`
-  - 纯数字：`20260612103045`
-- 🔔 复制后弹出通知提示
-- 🚀 开机自启
+- 📅 多种时间格式：完整时间 / 日期 / 纯数字
+- 🔔 复制后桌面通知
+- 🪟 Linux + Windows 跨平台
 
-## 内存占用对比
+## 内存占用
 
-| 版本 | 内存 | 二进制大小 |
-|------|------|-----------|
-| Python (GTK) | ~42 MB | - |
-| **Rust** | **~26 MB** | **1.3 MB** |
+| 版本 | 内存 |
+|------|------|
+| Python | ~42 MB |
+| **Rust** | **~7 MB** |
 
 ## 依赖
 
-### 系统依赖
+### Linux
+- `libgtk-3-dev`
+- `libappindicator3-dev`
 
 ```bash
-sudo apt install -y libappindicator3-dev libgtk-3-dev
+sudo apt install -y libgtk-3-dev libappindicator3-dev
 ```
 
-### 编译依赖
-
-- Rust 1.70+ (通过 rustup 安装)
+### Windows
+- 无需额外依赖（使用 tray-icon 原生 API）
 
 ## 编译
 
@@ -38,7 +38,7 @@ sudo apt install -y libappindicator3-dev libgtk-3-dev
 cargo build --release
 ```
 
-编译产物：`target/release/copy-time-tray`（1.3 MB）
+编译产物：`target/release/copy-time-tray`
 
 ## 运行
 
@@ -46,26 +46,34 @@ cargo build --release
 ./target/release/copy-time-tray
 ```
 
-或后台运行：
+### Linux 开机自启 (systemd)
 
 ```bash
-nohup ./target/release/copy-time-tray &
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/copy-time-tray.service << EOF
+[Unit]
+Description=Copy Time Tray
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/path/to/copy-time-tray
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target
+EOF
+
+systemctl --user daemon-reload
+systemctl --user enable --now copy-time-tray
 ```
 
-## 开机自启
+### Windows 开机自启
 
-```bash
-mkdir -p ~/.config/autostart
-cat > ~/.config/autostart/copy-time-tray.desktop << EOF
-[Desktop Entry]
-Type=Application
-Name=Copy Time Tray
-Comment=点击复制当前时间到剪贴板
-Exec=$(pwd)/target/release/copy-time-tray
-Hidden=false
-NoDisplay=false
-X-GNOME-Autostart-enabled=true
-EOF
+将 `copy-time-tray.exe` 快捷方式放到：
+```
+%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\
 ```
 
 ## 项目结构
@@ -73,28 +81,19 @@ EOF
 ```
 copy-time-tray/
 ├── src/
-│   └── main.rs          # 主程序
-├── Cargo.toml           # 依赖配置
+│   └── main.rs          # 跨平台主程序（条件编译）
+├── icons/
+│   └── copy-time.svg    # 时钟图标（Linux）
+├── Cargo.toml
 └── README.md
 ```
 
-## 依赖 crate
+## 架构
 
-- `libappindicator` - 系统托盘（libappindicator3 绑定）
-- `gtk` - GTK3 菜单
-- `chrono` - 时间处理
-- `arboard` - 剪贴板操作
-- `notify-rust` - 桌面通知
-
-## 卸载
-
-```bash
-# 删除开机自启
-rm ~/.config/autostart/copy-time-tray.desktop
-
-# 停止进程
-pkill -f copy-time-tray
-```
+| 平台 | 托盘 | 菜单 | 事件循环 |
+|------|------|------|----------|
+| Linux | libappindicator | GTK | gtk::main() |
+| Windows | tray-icon | muda | 简单休眠循环 |
 
 ## License
 
