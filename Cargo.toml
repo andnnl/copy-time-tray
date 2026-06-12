@@ -22,6 +22,11 @@ tray-icon = "0.24"
 muda = "0.19"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+tray-icon = "0.24"
+muda = "0.19"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 [profile.release]
 opt-level = "z"
 lto = true
