@@ -25,7 +25,8 @@ fn copy_time(format: &str) {
 fn main() {
     gtk::init().expect("Failed to initialize GTK");
 
-    let mut indicator = AppIndicator::new("copy-time", "accessories-clock");
+    let icon_path = format!("{}/icons/copy-time.svg", env!("CARGO_MANIFEST_DIR"));
+    let mut indicator = AppIndicator::new("copy-time", &icon_path);
     indicator.set_status(AppIndicatorStatus::Active);
     indicator.set_title("Copy Time");
 
