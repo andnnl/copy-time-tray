@@ -2,7 +2,6 @@
 // ===== Linux 实现（GTK + libappindicator）=====
 #[cfg(target_os = "linux")]
 mod platform {
-    use arboard::Clipboard;
     use chrono::Local;
     use gtk::prelude::*;
     use gtk::{Menu, MenuItem, SeparatorMenuItem};
@@ -16,9 +15,9 @@ mod platform {
             "compact" => now.format("%Y%m%d%H%M%S").to_string(),
             _ => now.format("%Y-%m-%d %H:%M:%S").to_string(),
         };
-        if let Ok(mut clipboard) = Clipboard::new() {
-            let _ = clipboard.set_text(&text);
-        }
+        let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
+        clipboard.set_text(&text);
+        clipboard.store();
         let _ = Notification::new()
             .summary("Copy Time")
             .body(&format!("已复制: {}", text))

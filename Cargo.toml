@@ -1,6 +1,6 @@
 [package]
 name = "copy-time-tray"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "跨平台托盘时钟 - 点击复制时间到剪贴板"
 
@@ -10,7 +10,6 @@ path = "src/main.rs"
 
 [dependencies]
 chrono = "0.4"
-arboard = "3.4"
 notify-rust = "4"
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -18,6 +17,7 @@ gtk = "0.18"
 libappindicator = "0.9"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+arboard = "3.4"
 tray-icon = "0.24"
 muda = "0.19"
 image = { version = "0.25", default-features = false, features = ["png"] }
