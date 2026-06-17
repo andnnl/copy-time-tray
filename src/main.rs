@@ -2,6 +2,8 @@ use chrono::Local;
 use md5::{Digest, Md5};
 use rand::Rng;
 
+mod snippet;
+
 fn generate_password(length: usize) -> String {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
     let mut rng = rand::thread_rng();
