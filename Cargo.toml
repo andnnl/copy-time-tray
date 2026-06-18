@@ -29,6 +29,7 @@ base64 = "0.22"
 crossbeam-channel = "0.5"
 thiserror = "2"
 directories = "6"
+dirs = "5"
 log = "0.4"
 
 # Snippet feature - GUI
@@ -53,7 +54,6 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 tempfile = "3"
-dirs = "5"
 
 [profile.release]
 opt-level = "z"
