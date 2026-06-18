@@ -51,6 +51,10 @@ tray-icon = "0.24"
 muda = "0.19"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+[dev-dependencies]
+tempfile = "3"
+dirs = "5"
+
 [profile.release]
 opt-level = "z"
 lto = true
