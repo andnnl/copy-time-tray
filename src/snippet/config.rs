@@ -18,7 +18,7 @@ pub struct SyncConfig {
     pub token: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub sync: Option<SyncConfig>,
 }
