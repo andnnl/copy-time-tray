@@ -248,13 +248,115 @@ pub fn generate_file_id(relative_path: &str) -> String {
     hex[..16].to_string()
 }
 
-// Push 协议骨架（Task 7 中完善）
 pub fn push(
-    _config: &SyncConfig,
-    _client: &dyn HttpClient,
-    _snippets: &[Snippet],
-) -> Result<(), SyncError> {
-    Ok(())
+    config: &SyncConfig,
+    client: &dyn HttpClient,
+    snippets: &[Snippet],
+) -> Result<Vec<String>, SyncError> {
+    let base = base_url(config);
+    let headers = auth_headers(config);
+    let mut failed_ids = Vec::new();
+
+    for snippet in snippets {
+        if snippet.snippet_type == crate::snippet::model::SnippetType::Folder {
+            continue;
+        }
+
+        let relative_path = snippet_to_path(snippet)?;
+        let yaml_content = snippet_to_yaml(snippet)?;
+
+        if snippet.deleted {
+            let delete_url = format!("{}/contents/{}", base, relative_path);
+            let _delete_body = serde_json::json!({
+                "message": format!("Delete snippet: {}", snippet.name),
+                "branch": config.branch,
+            });
+            let resp = client.delete(&delete_url, &headers);
+            match resp {
+                Ok(r) if r.status == 200 || r.status == 404 => {
+                    // 404 = 文件已被删除，视为成功
+                }
+                Ok(r) => {
+                    log::warn!("Delete failed for {}: {}", snippet.name, r.status);
+                    failed_ids.push(snippet.id.clone());
+                    continue;
+                }
+                Err(e) => {
+                    log::warn!("Delete error for {}: {}", snippet.name, e);
+                    failed_ids.push(snippet.id.clone());
+                    continue;
+                }
+            }
+        } else {
+            let put_url = format!("{}/contents/{}", base, relative_path);
+            let encoded = base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                yaml_content.as_bytes(),
+            );
+
+            let body = serde_json::json!({
+                "message": format!("Update snippet: {}", snippet.name),
+                "content": encoded,
+                "branch": config.branch,
+            });
+            let body_str = serde_json::to_string(&body).unwrap();
+            let resp = client.put(&put_url, &headers, &body_str);
+            match resp {
+                Ok(r) if r.status == 200 || r.status == 201 => {}
+                Ok(r) => {
+                    log::warn!("Push failed for {}: {}", snippet.name, r.status);
+                    failed_ids.push(snippet.id.clone());
+                    continue;
+                }
+                Err(e) => {
+                    log::warn!("Push error for {}: {}", snippet.name, e);
+                    failed_ids.push(snippet.id.clone());
+                    continue;
+                }
+            }
+        }
+    }
+
+    if failed_ids.is_empty() {
+        Ok(Vec::new())
+    } else {
+        Err(SyncError::Store(format!(
+            "Failed to push {} snippets",
+            failed_ids.len()
+        )))
+    }
+}
+
+fn snippet_to_path(snippet: &Snippet) -> Result<String, SyncError> {
+    let safe_name = sanitize_filename(&snippet.name);
+    Ok(format!("snippets/{}.yaml", safe_name))
+}
+
+fn sanitize_filename(name: &str) -> String {
+    name.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_")
+}
+
+fn snippet_to_yaml(snippet: &Snippet) -> Result<String, SyncError> {
+    let content = snippet.content.as_deref().unwrap_or("");
+    let yaml = format!(
+        r#"name: {}
+content: |
+{}
+sort: {}
+created: "{}"
+updated: "{}"
+"#,
+        snippet.name,
+        content
+            .lines()
+            .map(|l| format!("  {}", l))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        snippet.sort,
+        snippet.create_date.to_rfc3339(),
+        snippet.update_date.to_rfc3339(),
+    );
+    Ok(yaml)
 }
 
 #[cfg(test)]
@@ -448,5 +550,56 @@ mod tests {
     fn test_parse_invalid_yaml_fails() {
         let result = parse_yaml_snippet("test.yaml", "invalid: yaml: :");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_push_new_snippet() {
+        let config = test_config();
+        let mut snippet = Snippet::new_snippet("push-test".into(), "echo test".into(), None);
+        snippet.synced = false;
+        let client = MockHttpClient;
+        MOCK_REQUESTS.with(|r| r.lock().unwrap().clear());
+        let result = push(&config, &client, &[snippet]);
+        assert!(result.is_ok());
+        let reqs = MOCK_REQUESTS.with(|r| r.lock().unwrap().clone());
+        assert!(reqs.iter().any(|(m, _)| m == "PUT"));
+    }
+
+    #[test]
+    fn test_push_deleted_snippet() {
+        let config = test_config();
+        let mut snippet = Snippet::new_snippet("delete-me".into(), "content".into(), None);
+        snippet.synced = false;
+        snippet.deleted = true;
+        let client = MockHttpClient;
+        MOCK_REQUESTS.with(|r| r.lock().unwrap().clear());
+        let result = push(&config, &client, &[snippet]);
+        assert!(result.is_ok());
+        let reqs = MOCK_REQUESTS.with(|r| r.lock().unwrap().clone());
+        assert!(reqs.iter().any(|(m, _)| m == "DELETE"));
+    }
+
+    #[test]
+    fn test_snippet_to_yaml_format() {
+        let snippet = Snippet::new_snippet("test".into(), "line1\nline2".into(), None);
+        let yaml = snippet_to_yaml(&snippet).unwrap();
+        assert!(yaml.contains("name: test"));
+        assert!(yaml.contains("content: |"));
+        assert!(yaml.contains("  line1"));
+        assert!(yaml.contains("  line2"));
+    }
+
+    #[test]
+    fn test_snippet_to_path() {
+        let snippet = Snippet::new_snippet("正常文件名".into(), "content".into(), None);
+        let path = snippet_to_path(&snippet).unwrap();
+        assert_eq!(path, "snippets/正常文件名.yaml");
+    }
+
+    #[test]
+    fn test_snippet_to_path_sanitizes() {
+        let snippet = Snippet::new_snippet("bad/name".into(), "content".into(), None);
+        let path = snippet_to_path(&snippet).unwrap();
+        assert_eq!(path, "snippets/bad_name.yaml");
     }
 }
