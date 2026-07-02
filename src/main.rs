@@ -356,19 +356,29 @@ mod platform {
                             copy_to_clipboard(&generate_md5(&time_text, 32));
                         }
                         "sync_snippets" => {
-                            let _ = notify_rust::Notification::new()
-                                .summary("同步")
-                                .body("同步功能待实现")
-                                .show();
+                            if let Ok(manager) = SnippetManager::new() {
+                                let sync_result = manager.do_pull().and_then(|_| manager.do_push());
+                                match sync_result {
+                                    Ok(_) => {
+                                        let _ = notify_rust::Notification::new()
+                                            .summary("同步成功")
+                                            .body("Snippets 已同步到云端")
+                                            .show();
+                                    }
+                                    Err(e) => {
+                                        let _ = notify_rust::Notification::new()
+                                            .summary("同步失败")
+                                            .body(&format!("{}", e))
+                                            .show();
+                                    }
+                                }
+                            }
                         }
                         "search_snippets" => {
-                            let _ = notify_rust::Notification::new()
-                                .summary("搜索")
-                                .body("搜索功能待实现")
-                                .show();
+                            let _ = cmd_tx.send(UiCommand::Show);
                         }
                         "quit" => {
-                            std::process::exit(0);
+                            running.store(false, std::sync::atomic::Ordering::SeqCst);
                         }
                         _ => {}
                     }
@@ -376,9 +386,9 @@ mod platform {
             }
         });
 
-        // Windows 保持进程存活
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
+        // Windows 保持进程存活，直到收到退出信号
+        while running.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
 }
@@ -622,8 +632,9 @@ fn main() {
     #[cfg(target_os = "windows")]
     {
         let resp_tx_clone = resp_tx.clone();
+        let running_clone = running.clone();
         std::thread::spawn(move || {
-            launch_egui(cmd_rx, resp_tx_clone, running);
+            launch_egui(cmd_rx, resp_tx_clone, running_clone);
         });
     }
 
@@ -634,5 +645,5 @@ fn main() {
     #[cfg(target_os = "linux")]
     platform::main(cmd_tx);
     #[cfg(target_os = "windows")]
-    platform::main(cmd_tx);
+    platform::main(cmd_tx, running);
 }
