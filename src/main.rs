@@ -160,7 +160,28 @@ mod platform {
 
                 if !manager.is_configured() {
                     glib::idle_add(move || {
-                        let _ = config_dialog::show_config_dialog(None);
+                        if let Some(config_result) = config_dialog::show_config_dialog(None) {
+                            let config = crate::snippet::config::Config {
+                                sync: Some(crate::snippet::config::SyncConfig {
+                                    provider: config_result.provider,
+                                    owner: config_result.owner,
+                                    repo: config_result.repo,
+                                    branch: config_result.branch,
+                                    token: config_result.token,
+                                }),
+                            };
+                            if let Err(e) = config.save() {
+                                let _ = notify_rust::Notification::new()
+                                    .summary("配置保存失败")
+                                    .body(&format!("{}", e))
+                                    .show();
+                            } else {
+                                let _ = notify_rust::Notification::new()
+                                    .summary("配置已保存")
+                                    .body("现在可以再次点击同步")
+                                    .show();
+                            }
+                        }
                         glib::ControlFlow::Break
                     });
                     return;
