@@ -12,8 +12,43 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 static MANAGER: OnceLock<Mutex<SnippetManager>> = OnceLock::new();
 
+#[cfg(target_os = "windows")]
+static CMD_TX: OnceLock<crossbeam_channel::Sender<UiCommand>> = OnceLock::new();
+
 #[cfg(target_os = "linux")]
 static DIALOG_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 读取当前 snippet 列表并广播给 UI
+fn broadcast_refresh(snippet_type_filter: Option<snippet::model::SnippetType>) -> Vec<snippet::model::Snippet> {
+    let manager_guard = match MANAGER.get().and_then(|m| m.lock().ok()) {
+        Some(guard) => guard,
+        None => return Vec::new(),
+    };
+    let result = manager_guard.with_store(|store| {
+        store.list()
+            .iter()
+            .filter(|s| {
+                if s.deleted {
+                    return false;
+                }
+                if let Some(ref filter_type) = snippet_type_filter {
+                    return s.snippet_type == *filter_type;
+                }
+                true
+            })
+            .cloned()
+            .collect()
+    });
+    result.unwrap_or_default()
+}
+
+#[cfg(target_os = "windows")]
+fn send_refresh_to_search() {
+    let snippets = broadcast_refresh(None);
+    if let Some(tx) = CMD_TX.get() {
+        let _ = tx.send(UiCommand::RefreshSnippets(snippets));
+    }
+}
 
 fn generate_password(length: usize) -> String {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
@@ -390,6 +425,7 @@ mod platform {
                             }
                         }
                         "search_snippets" => {
+                            send_refresh_to_search();
                             let _ = cmd_tx.send(UiCommand::Show);
                         }
                         "quit" => {
@@ -497,6 +533,8 @@ fn handle_ui_response(response: UiResponse) {
         }
         UiResponse::SnippetCreated(snippet) => {
             let _ = manager.with_store_mut(|store| store.add(snippet.clone()));
+            #[cfg(target_os = "windows")]
+            send_refresh_to_search();
         }
         UiResponse::SnippetUpdated(snippet) => {
             let id = snippet.id.clone();
@@ -506,9 +544,13 @@ fn handle_ui_response(response: UiResponse) {
                     s.content = snippet.content.clone();
                 })
             });
+            #[cfg(target_os = "windows")]
+            send_refresh_to_search();
         }
         UiResponse::SnippetDeleted(id) => {
             let _ = manager.with_store_mut(|store| store.delete(&id));
+            #[cfg(target_os = "windows")]
+            send_refresh_to_search();
         }
         UiResponse::RequestPull
         | UiResponse::RequestPush
@@ -670,6 +712,11 @@ fn main() {
                 .body(&format!("无法启动 Snippet 功能: {}", e))
                 .show();
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let _ = CMD_TX.set(cmd_tx.clone());
     }
 
     #[cfg(target_os = "windows")]
