@@ -3,6 +3,7 @@ use crate::snippet::model::Snippet;
 
 pub mod search;
 pub mod editor;
+pub mod config_dialog;
 
 #[derive(Debug, Clone)]
 pub enum UiCommand {

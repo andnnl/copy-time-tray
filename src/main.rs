@@ -46,9 +46,10 @@ fn get_time_text(format: &str) -> String {
 mod platform {
     use super::*;
     use gtk::prelude::*;
-    use gtk::{Menu, MenuItem, SeparatorMenuItem};
+    use gtk::{glib, Menu, MenuItem, SeparatorMenuItem};
     use libappindicator::{AppIndicator, AppIndicatorStatus};
     use notify_rust::Notification;
+    use snippet::ui::config_dialog;
 
     fn copy_to_clipboard(text: &str) {
         let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
@@ -144,6 +145,57 @@ mod platform {
 
         let sync_item = MenuItem::with_label("同步 Snippet");
         sync_item.connect_activate(move |_| {
+            std::thread::spawn(|| {
+                let manager_result = SnippetManager::new();
+                let manager = match manager_result {
+                    Ok(m) => m,
+                    Err(e) => {
+                        let _ = notify_rust::Notification::new()
+                            .summary("Snippet Sync Failed")
+                            .body(&format!("创建管理器失败: {}", e))
+                            .show();
+                        return;
+                    }
+                };
+
+                if !manager.is_configured() {
+                    glib::idle_add(move || {
+                        let _ = config_dialog::show_config_dialog(None);
+                        glib::ControlFlow::Break
+                    });
+                    return;
+                }
+
+                glib::idle_add(move || {
+                    let _ = notify_rust::Notification::new()
+                        .summary("Snippet Sync")
+                        .body("同步中...")
+                        .show();
+                    glib::ControlFlow::Break
+                });
+
+                let sync_result = manager.do_pull().and_then(|_| manager.do_push());
+                let sync_result = std::sync::Arc::new(std::sync::Mutex::new(sync_result));
+
+                glib::idle_add(move || {
+                    let result = sync_result.lock().unwrap().clone();
+                    match result {
+                        Ok(_) => {
+                            let _ = notify_rust::Notification::new()
+                                .summary("Snippet Sync")
+                                .body("同步完成")
+                                .show();
+                        }
+                        Err(e) => {
+                            let _ = notify_rust::Notification::new()
+                                .summary("Snippet Sync Failed")
+                                .body(&e)
+                                .show();
+                        }
+                    }
+                    glib::ControlFlow::Break
+                });
+            });
         });
         menu.append(&sync_item);
 
@@ -424,32 +476,67 @@ fn launch_snippet_dialog_linux(
     scrolled.add(&list_box);
     content.pack_start(&scrolled, true, true, 4);
 
-    if let Ok(manager) = SnippetManager::new() {
-        let _ = manager.with_store(|store| {
-            for snippet in store.list() {
-                if snippet.deleted {
-                    continue;
+    let snippets = match SnippetManager::new() {
+        Ok(manager) => {
+            match manager.with_store(|store| {
+                let snippets = store.list();
+                snippets.to_vec()
+            }) {
+                Ok(snippets) => {
+                    eprintln!("[DEBUG] Loaded {} snippets from store", snippets.len());
+                    snippets
+                },
+                Err(e) => {
+                    eprintln!("[ERROR] Failed to access store: {}", e);
+                    Vec::new()
                 }
-                if snippet.snippet_type != SnippetType::Snippet {
-                    continue;
-                }
-                let row = gtk::ListBoxRow::new();
-                let label = gtk::Label::new(Some(&snippet.name));
-                label.set_xalign(0.0);
-                label.set_margin_start(6);
-                row.add(&label);
-                let preview: String = snippet
-                    .content
-                    .as_deref()
-                    .unwrap_or("")
-                    .chars()
-                    .take(60)
-                    .collect();
-                row.set_tooltip_text(Some(&preview));
-                list_box.add(&row);
             }
-        });
+        }
+        Err(e) => {
+            eprintln!("[ERROR] Failed to create SnippetManager: {}", e);
+            Vec::new()
+        }
+    };
+
+    let mut snippet_count = 0;
+    for snippet in &snippets {
+        eprintln!("[DEBUG] Processing snippet: name='{}', type={:?}, deleted={}", 
+            snippet.name, snippet.snippet_type, snippet.deleted);
+        if snippet.deleted {
+            eprintln!("[DEBUG] Skipping deleted snippet: {}", snippet.name);
+            continue;
+        }
+        if snippet.snippet_type != SnippetType::Snippet {
+            eprintln!("[DEBUG] Skipping non-snippet type: {}", snippet.name);
+            continue;
+        }
+        let row = gtk::ListBoxRow::new();
+        let label = gtk::Label::new(Some(&snippet.name));
+        label.set_xalign(0.0);
+        label.set_margin_start(6);
+        row.add(&label);
+        let preview: String = snippet
+            .content
+            .as_deref()
+            .unwrap_or("")
+            .chars()
+            .take(60)
+            .collect();
+        row.set_tooltip_text(Some(&preview));
+        list_box.add(&row);
+        snippet_count += 1;
     }
+
+    if snippet_count == 0 {
+        let empty_label = gtk::Label::new(Some("暂无数据，请先创建 snippet"));
+        empty_label.set_justify(gtk::Justification::Center);
+        empty_label.set_margin_top(20);
+        empty_label.set_margin_bottom(20);
+        empty_label.style_context().add_class("dim-label");
+        content.pack_start(&empty_label, true, true, 0);
+    }
+
+    content.show_all();
 
     let list_box_clone = list_box.clone();
     entry.connect_changed(move |e| {
