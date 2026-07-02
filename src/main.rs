@@ -350,6 +350,44 @@ fn launch_global_hotkey(cmd_tx: crossbeam_channel::Sender<UiCommand>) {
     });
 }
 
+fn handle_ui_response(response: UiResponse) {
+    match response {
+        UiResponse::SnippetCopied(content) => {
+            #[cfg(target_os = "linux")]
+            {
+                use gtk::prelude::*;
+                let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
+                clipboard.set_text(&content);
+                clipboard.store();
+            }
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            {
+                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                    let _ = clipboard.set_text(&content);
+                }
+            }
+            let _ = notify_rust::Notification::new()
+                .summary("Snippet Copied")
+                .body(&format!("已复制: {}", &content.chars().take(30).collect::<String>()))
+                .show();
+        }
+        UiResponse::SnippetCreated(_)
+        | UiResponse::SnippetUpdated(_)
+        | UiResponse::SnippetDeleted(_)
+        | UiResponse::RequestPull
+        | UiResponse::RequestPush
+        | UiResponse::Close => {}
+    }
+}
+
+fn spawn_response_handler(resp_rx: crossbeam_channel::Receiver<UiResponse>) {
+    std::thread::spawn(move || {
+        while let Ok(response) = resp_rx.recv() {
+            handle_ui_response(response);
+        }
+    });
+}
+
 fn main() {
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<UiCommand>();
     let (resp_tx, resp_rx) = crossbeam_channel::unbounded::<UiResponse>();
@@ -365,6 +403,8 @@ fn main() {
     });
 
     launch_global_hotkey(cmd_tx.clone());
+
+    spawn_response_handler(resp_rx);
 
     #[cfg(target_os = "linux")]
     platform::main(cmd_tx);
