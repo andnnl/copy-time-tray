@@ -154,6 +154,10 @@ mod platform {
         });
         menu.append(&snippet_item);
 
+        let quit_item = MenuItem::with_label("退出");
+        quit_item.connect_activate(|_| gtk::main_quit());
+        menu.append(&quit_item);
+
         menu.show_all();
         indicator.set_menu(&mut menu);
 
