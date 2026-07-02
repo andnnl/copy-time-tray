@@ -2,6 +2,7 @@ use eframe::egui;
 use crossbeam_channel::{Sender, Receiver, TryRecvError};
 use crate::snippet::model::Snippet;
 use crate::snippet::ui::{UiCommand, UiResponse};
+use crate::snippet::ui::editor::EditorPopup;
 
 pub struct SearchPopup {
     search_query: String,
@@ -13,6 +14,7 @@ pub struct SearchPopup {
     last_query: String,
     cmd_receiver: Option<Receiver<UiCommand>>,
     resp_sender: Option<Sender<UiResponse>>,
+    editor: EditorPopup,
 }
 
 impl Default for SearchPopup {
@@ -27,6 +29,7 @@ impl Default for SearchPopup {
             last_query: String::new(),
             cmd_receiver: None,
             resp_sender: None,
+            editor: EditorPopup::default(),
         }
     }
 }
@@ -35,7 +38,8 @@ impl SearchPopup {
     pub fn new(cmd_receiver: Receiver<UiCommand>, resp_sender: Sender<UiResponse>) -> Self {
         Self {
             cmd_receiver: Some(cmd_receiver),
-            resp_sender: Some(resp_sender),
+            resp_sender: Some(resp_sender.clone()),
+            editor: EditorPopup::new(resp_sender),
             ..Default::default()
         }
     }
@@ -89,12 +93,37 @@ impl eframe::App for SearchPopup {
             return;
         }
 
+        if self.editor.is_visible() {
+            self.editor.update(ctx, _frame);
+            return;
+        }
+
         egui::Window::new("Snippet 搜索")
             .collapsible(false)
             .resizable(false)
             .default_width(600.0)
             .default_height(400.0)
             .show(ctx, |ui| {
+                if ui.input(|i| i.key_pressed(egui::Key::N) && i.modifiers.ctrl) {
+                    self.editor.show_create();
+                }
+
+                if ui.input(|i| i.key_pressed(egui::Key::E) && i.modifiers.ctrl) {
+                    if let Some(snippet) = self.filtered.get(self.selected_index) {
+                        if matches!(snippet.snippet_type, crate::snippet::model::SnippetType::Snippet) {
+                            self.editor.show_edit(snippet.clone());
+                        }
+                    }
+                }
+
+                if ui.input(|i| i.key_pressed(egui::Key::D) && i.modifiers.ctrl) {
+                    if let Some(snippet) = self.filtered.get(self.selected_index) {
+                        if matches!(snippet.snippet_type, crate::snippet::model::SnippetType::Snippet) {
+                            self.editor.show_delete(snippet.clone());
+                        }
+                    }
+                }
+
                 ui.horizontal(|ui| {
                     ui.label("🔍");
                     if ui.text_edit_singleline(&mut self.search_query).lost_focus()
@@ -178,16 +207,12 @@ impl eframe::App for SearchPopup {
                     }
                 }
 
-                if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
-                    if self.selected_index > 0 {
-                        self.selected_index -= 1;
-                    }
+                if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) && self.selected_index > 0 {
+                    self.selected_index -= 1;
                 }
 
-                if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-                    if self.selected_index + 1 < self.filtered.len() {
-                        self.selected_index += 1;
-                    }
+                if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) && self.selected_index + 1 < self.filtered.len() {
+                    self.selected_index += 1;
                 }
 
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) {

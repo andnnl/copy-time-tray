@@ -7,9 +7,7 @@ mod snippet;
 use snippet::SnippetManager;
 use snippet::ui::{UiCommand, UiResponse};
 use snippet::ui::search::SearchPopup;
-use snippet::ui::editor::EditorPopup;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 fn generate_password(length: usize) -> String {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
@@ -65,7 +63,7 @@ mod platform {
         copy_to_clipboard(&get_time_text(format));
     }
 
-    pub fn main(cmd_tx: crossbeam_channel::Sender<UiCommand>) {
+    pub fn main(_cmd_tx: crossbeam_channel::Sender<UiCommand>) {
         gtk::init().expect("Failed to initialize GTK");
 
         let icon_path = format!("{}/icons/copy-time.svg", env!("CARGO_MANIFEST_DIR"));
@@ -205,7 +203,7 @@ mod platform {
         rgba
     }
 
-    pub fn main(cmd_tx: crossbeam_channel::Sender<UiCommand>) {
+    pub fn main(_cmd_tx: crossbeam_channel::Sender<UiCommand>) {
         let menu = Menu::new();
 
         // 复制时间菜单项
@@ -355,7 +353,6 @@ fn handle_ui_response(response: UiResponse) {
         UiResponse::SnippetCopied(content) => {
             #[cfg(target_os = "linux")]
             {
-                use gtk::prelude::*;
                 let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
                 clipboard.set_text(&content);
                 clipboard.store();
