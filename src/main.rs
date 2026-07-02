@@ -4,6 +4,13 @@ use rand::Rng;
 
 mod snippet;
 
+use snippet::SnippetManager;
+use snippet::ui::{UiCommand, UiResponse};
+use snippet::ui::search::SearchPopup;
+use snippet::ui::editor::EditorPopup;
+use std::sync::Arc;
+use std::sync::Mutex;
+
 fn generate_password(length: usize) -> String {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
     let mut rng = rand::thread_rng();
@@ -58,7 +65,7 @@ mod platform {
         copy_to_clipboard(&get_time_text(format));
     }
 
-    pub fn main() {
+    pub fn main(cmd_tx: crossbeam_channel::Sender<UiCommand>) {
         gtk::init().expect("Failed to initialize GTK");
 
         let icon_path = format!("{}/icons/copy-time.svg", env!("CARGO_MANIFEST_DIR"));
@@ -135,6 +142,17 @@ mod platform {
         menu.append(&md5_item);
 
         menu.append(&SeparatorMenuItem::new());
+
+        let sync_item = MenuItem::with_label("同步 Snippet");
+        sync_item.connect_activate(move |_| {
+        });
+        menu.append(&sync_item);
+
+        let snippet_item = MenuItem::with_label("搜索 Snippet");
+        snippet_item.connect_activate(move |_| {
+        });
+        menu.append(&snippet_item);
+
         menu.show_all();
         indicator.set_menu(&mut menu);
 
@@ -187,7 +205,7 @@ mod platform {
         rgba
     }
 
-    pub fn main() {
+    pub fn main(cmd_tx: crossbeam_channel::Sender<UiCommand>) {
         let menu = Menu::new();
 
         // 复制时间菜单项
@@ -221,6 +239,12 @@ mod platform {
 
         menu.append(&PredefinedMenuItem::separator()).unwrap();
 
+        let sync_id = muda::MenuId::new("sync_snippets");
+        let sync_item = MenuItem::with_id(sync_id.clone(), "同步 Snippet", true, None);
+        let snippet_id = muda::MenuId::new("search_snippets");
+        let snippet_item = MenuItem::with_id(snippet_id.clone(), "搜索 Snippet", true, None);
+        menu.append_items(&[&sync_item, &snippet_item, &PredefinedMenuItem::separator()]).unwrap();
+
         let rgba = create_icon_rgba();
         let icon = image::RgbaImage::from_raw(32, 32, rgba).expect("Failed to create icon");
         let icon = tray_icon::Icon::from_rgba(icon.into_raw(), 32, 32).expect("Failed to create icon");
@@ -251,6 +275,8 @@ mod platform {
                             let time_text = get_time_text("full");
                             copy_to_clipboard(&generate_md5(&time_text, 32));
                         }
+                        "sync_snippets" => {}
+                        "search_snippets" => {}
                         _ => {}
                     }
                 }
@@ -264,6 +290,84 @@ mod platform {
     }
 }
 
+fn launch_egui(
+    cmd_rx: crossbeam_channel::Receiver<UiCommand>,
+    resp_tx: crossbeam_channel::Sender<UiResponse>,
+    running: Arc<std::sync::atomic::AtomicBool>,
+) {
+    let popup_tx = Arc::new(std::sync::Mutex::new(None::<crossbeam_channel::Sender<UiCommand>>));
+
+    let popup_tx_clone = popup_tx.clone();
+    std::thread::spawn(move || {
+        while let Ok(cmd) = cmd_rx.recv() {
+            if let Some(tx) = popup_tx_clone.lock().unwrap().as_ref() {
+                let _ = tx.send(cmd);
+            }
+        }
+    });
+
+    while running.load(std::sync::atomic::Ordering::Relaxed) {
+        let (new_popup_tx, popup_rx) = crossbeam_channel::unbounded::<UiCommand>();
+        *popup_tx.lock().unwrap() = Some(new_popup_tx);
+
+        let search = SearchPopup::new(popup_rx, resp_tx.clone());
+        let native_options = eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default()
+                .with_inner_size([600.0, 400.0])
+                .with_title("Snippet 搜索")
+                .with_visible(false),
+            ..Default::default()
+        };
+
+        let _ = eframe::run_native(
+            "Copy Time Tray - Snippet",
+            native_options,
+            Box::new(|_cc| Ok(Box::new(search))),
+        );
+    }
+}
+
+fn launch_global_hotkey(cmd_tx: crossbeam_channel::Sender<UiCommand>) {
+    use global_hotkey::hotkey::{HotKey, Modifiers, Code};
+    use global_hotkey::GlobalHotKeyManager;
+
+    let manager = GlobalHotKeyManager::new().unwrap();
+    let hotkey = HotKey::new(
+        Some(Modifiers::CONTROL | Modifiers::SHIFT),
+        Code::KeyS,
+    );
+    manager.register(hotkey).unwrap();
+    let event_receiver = global_hotkey::GlobalHotKeyEvent::receiver();
+
+    std::thread::spawn(move || {
+        loop {
+            if let Ok(event) = event_receiver.recv() {
+                if event.state == global_hotkey::HotKeyState::Pressed {
+                    let _ = cmd_tx.send(UiCommand::Show);
+                }
+            }
+        }
+    });
+}
+
 fn main() {
-    platform::main();
+    let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<UiCommand>();
+    let (resp_tx, resp_rx) = crossbeam_channel::unbounded::<UiResponse>();
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+    if let Ok(manager) = SnippetManager::new() {
+        manager.start_background_sync();
+    }
+
+    let resp_tx_clone = resp_tx.clone();
+    std::thread::spawn(move || {
+        launch_egui(cmd_rx, resp_tx_clone, running);
+    });
+
+    launch_global_hotkey(cmd_tx.clone());
+
+    #[cfg(target_os = "linux")]
+    platform::main(cmd_tx);
+    #[cfg(target_os = "windows")]
+    platform::main(cmd_tx);
 }
