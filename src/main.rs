@@ -300,7 +300,9 @@ mod platform {
         let sync_item = MenuItem::with_id(sync_id.clone(), "同步 Snippet", true, None);
         let snippet_id = muda::MenuId::new("search_snippets");
         let snippet_item = MenuItem::with_id(snippet_id.clone(), "搜索 Snippet", true, None);
-        menu.append_items(&[&sync_item, &snippet_item, &PredefinedMenuItem::separator()]).unwrap();
+        let quit_id = muda::MenuId::new("quit");
+        let quit_item = MenuItem::with_id(quit_id.clone(), "退出", true, None);
+        menu.append_items(&[&sync_item, &snippet_item, &PredefinedMenuItem::separator(), &quit_item]).unwrap();
 
         let rgba = create_icon_rgba();
         let icon = image::RgbaImage::from_raw(32, 32, rgba).expect("Failed to create icon");
@@ -332,8 +334,21 @@ mod platform {
                             let time_text = get_time_text("full");
                             copy_to_clipboard(&generate_md5(&time_text, 32));
                         }
-                        "sync_snippets" => {}
-                        "search_snippets" => {}
+                        "sync_snippets" => {
+                            let _ = notify_rust::Notification::new()
+                                .summary("同步")
+                                .body("同步功能待实现")
+                                .show();
+                        }
+                        "search_snippets" => {
+                            let _ = notify_rust::Notification::new()
+                                .summary("搜索")
+                                .body("搜索功能待实现")
+                                .show();
+                        }
+                        "quit" => {
+                            std::process::exit(0);
+                        }
                         _ => {}
                     }
                 }
