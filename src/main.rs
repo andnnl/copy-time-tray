@@ -8,7 +8,17 @@ use snippet::SnippetManager;
 use snippet::ui::{UiCommand, UiResponse};
 #[cfg(target_os = "windows")]
 use snippet::ui::search::SearchPopup;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+
+static MANAGER: OnceLock<Mutex<SnippetManager>> = OnceLock::new();
+
+#[cfg(target_os = "linux")]
+static DIALOG_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn init_manager() -> Result<(), String> {
+    let manager = SnippetManager::new().map_err(|e| e.to_string())?;
+    MANAGER.set(Mutex::new(manager)).map_err(|_| "Manager already initialized".to_string())
+}
 
 fn generate_password(length: usize) -> String {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
@@ -146,17 +156,17 @@ mod platform {
         let sync_item = MenuItem::with_label("同步 Snippet");
         sync_item.connect_activate(move |_| {
             std::thread::spawn(|| {
-                let manager_result = SnippetManager::new();
-                let manager = match manager_result {
-                    Ok(m) => m,
-                    Err(e) => {
+                let manager_guard = match MANAGER.get().and_then(|m| m.lock().ok()) {
+                    Some(guard) => guard,
+                    None => {
                         let _ = notify_rust::Notification::new()
                             .summary("Snippet Sync Failed")
-                            .body(&format!("创建管理器失败: {}", e))
+                            .body("管理器未初始化")
                             .show();
                         return;
                     }
                 };
+                let manager = &*manager_guard;
 
                 if !manager.is_configured() {
                     glib::idle_add(move || {
@@ -357,7 +367,8 @@ mod platform {
                             copy_to_clipboard(&generate_md5(&time_text, 32));
                         }
                         "sync_snippets" => {
-                            if let Ok(manager) = SnippetManager::new() {
+                            if let Some(manager_guard) = MANAGER.get().and_then(|m| m.lock().ok()) {
+                                let manager = &*manager_guard;
                                 if !manager.is_configured() {
                                     let _ = notify_rust::Notification::new()
                                         .summary("未配置同步")
@@ -464,10 +475,11 @@ fn launch_global_hotkey(cmd_tx: crossbeam_channel::Sender<UiCommand>) {
 }
 
 fn handle_ui_response(response: UiResponse) {
-    let manager = match SnippetManager::new() {
-        Ok(m) => m,
-        Err(_) => return,
+    let manager_guard = match MANAGER.get().and_then(|m| m.lock().ok()) {
+        Some(guard) => guard,
+        None => return,
     };
+    let manager = &*manager_guard;
 
     match response {
         UiResponse::SnippetCopied(content) => {
@@ -548,8 +560,9 @@ fn launch_snippet_dialog_linux(
     scrolled.add(&list_box);
     content.pack_start(&scrolled, true, true, 4);
 
-    let snippets = match SnippetManager::new() {
-        Ok(manager) => {
+    let snippets = match MANAGER.get().and_then(|m| m.lock().ok()) {
+        Some(manager_guard) => {
+            let manager = &*manager_guard;
             match manager.with_store(|store| {
                 let snippets = store.list();
                 snippets.to_vec()
@@ -564,8 +577,8 @@ fn launch_snippet_dialog_linux(
                 }
             }
         }
-        Err(e) => {
-            eprintln!("[ERROR] Failed to create SnippetManager: {}", e);
+        None => {
+            eprintln!("[ERROR] Failed to access manager");
             Vec::new()
         }
     };
@@ -651,8 +664,14 @@ fn main() {
     let (resp_tx, resp_rx) = crossbeam_channel::unbounded::<UiResponse>();
     let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
 
-    if let Ok(manager) = SnippetManager::new() {
-        manager.start_background_sync();
+    match SnippetManager::new() {
+        Ok(manager) => {
+            manager.start_background_sync();
+            let _ = MANAGER.set(Mutex::new(manager));
+        }
+        Err(e) => {
+            eprintln!("Failed to initialize SnippetManager: {}", e);
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -671,8 +690,13 @@ fn main() {
             while let Ok(cmd) = cmd_rx_for_linux.recv() {
                 match cmd {
                     UiCommand::Show => {
+                        if DIALOG_OPEN.load(std::sync::atomic::Ordering::SeqCst) {
+                            continue;
+                        }
+                        DIALOG_OPEN.store(true, std::sync::atomic::Ordering::SeqCst);
                         let _ = std::thread::spawn(|| {
                             launch_snippet_dialog_linux(crossbeam_channel::unbounded().0);
+                            DIALOG_OPEN.store(false, std::sync::atomic::Ordering::SeqCst);
                         });
                     }
                     _ => {}
