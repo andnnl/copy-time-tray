@@ -6,6 +6,7 @@ mod snippet;
 
 use snippet::SnippetManager;
 use snippet::ui::{UiCommand, UiResponse};
+#[cfg(target_os = "windows")]
 use snippet::ui::search::SearchPopup;
 use std::sync::Arc;
 
@@ -147,7 +148,9 @@ mod platform {
         menu.append(&sync_item);
 
         let snippet_item = MenuItem::with_label("搜索 Snippet");
+        let cmd_tx_clone = _cmd_tx.clone();
         snippet_item.connect_activate(move |_| {
+            launch_snippet_dialog_linux(cmd_tx_clone.clone());
         });
         menu.append(&snippet_item);
 
@@ -288,6 +291,7 @@ mod platform {
     }
 }
 
+#[cfg(target_os = "windows")]
 fn launch_egui(
     cmd_rx: crossbeam_channel::Receiver<UiCommand>,
     resp_tx: crossbeam_channel::Sender<UiResponse>,
@@ -385,6 +389,100 @@ fn spawn_response_handler(resp_rx: crossbeam_channel::Receiver<UiResponse>) {
     });
 }
 
+#[cfg(target_os = "linux")]
+fn launch_snippet_dialog_linux(
+    _cmd_tx: crossbeam_channel::Sender<UiCommand>,
+) {
+    use gtk::prelude::*;
+    use snippet::model::SnippetType;
+
+    let dialog = gtk::Dialog::with_buttons::<gtk::Window>(
+        Some("搜索 Snippet"),
+        None,
+        gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
+        &[("关闭", gtk::ResponseType::Close)],
+    );
+    dialog.set_default_size(500, 350);
+
+    let content = dialog.content_area();
+
+    let entry = gtk::SearchEntry::new();
+    entry.set_placeholder_text(Some("搜索片段..."));
+    content.pack_start(&entry, false, true, 4);
+
+    let scrolled = gtk::ScrolledWindow::new(
+        None::<&gtk::Adjustment>,
+        None::<&gtk::Adjustment>,
+    );
+    scrolled.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    let list_box = gtk::ListBox::new();
+    list_box.set_selection_mode(gtk::SelectionMode::Single);
+    scrolled.add(&list_box);
+    content.pack_start(&scrolled, true, true, 4);
+
+    if let Ok(manager) = SnippetManager::new() {
+        let _ = manager.with_store(|store| {
+            for snippet in store.list() {
+                if snippet.deleted {
+                    continue;
+                }
+                if snippet.snippet_type != SnippetType::Snippet {
+                    continue;
+                }
+                let row = gtk::ListBoxRow::new();
+                let label = gtk::Label::new(Some(&snippet.name));
+                label.set_xalign(0.0);
+                label.set_margin_start(6);
+                row.add(&label);
+                let preview: String = snippet
+                    .content
+                    .as_deref()
+                    .unwrap_or("")
+                    .chars()
+                    .take(60)
+                    .collect();
+                row.set_tooltip_text(Some(&preview));
+                list_box.add(&row);
+            }
+        });
+    }
+
+    let list_box_clone = list_box.clone();
+    entry.connect_changed(move |e| {
+        let text = e.text().to_string().to_lowercase();
+        for child in list_box_clone.children() {
+            if let Some(row) = child.downcast_ref::<gtk::ListBoxRow>() {
+                if let Some(c) = row.child() {
+                    if let Some(lbl) = c.downcast_ref::<gtk::Label>() {
+                        let name = lbl.text().to_lowercase();
+                        row.set_visible(text.is_empty() || name.contains(&text));
+                    }
+                }
+            }
+        }
+    });
+
+    let dialog_clone = dialog.clone();
+    list_box.connect_row_activated(move |_, row| {
+        let preview = row
+            .tooltip_text()
+            .unwrap_or_default();
+        let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
+        clipboard.set_text(&preview);
+        clipboard.store();
+        let _ = notify_rust::Notification::new()
+            .summary("Snippet Copied")
+            .body(&format!("已复制: {}", &preview.chars().take(30).collect::<String>()))
+            .show();
+        dialog_clone.response(gtk::ResponseType::Close);
+    });
+
+    entry.set_activates_default(true);
+    let _ = dialog.run();
+    dialog.hide();
+}
+
+#[allow(unused_variables)]
 fn main() {
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<UiCommand>();
     let (resp_tx, resp_rx) = crossbeam_channel::unbounded::<UiResponse>();
@@ -394,10 +492,13 @@ fn main() {
         manager.start_background_sync();
     }
 
-    let resp_tx_clone = resp_tx.clone();
-    std::thread::spawn(move || {
-        launch_egui(cmd_rx, resp_tx_clone, running);
-    });
+    #[cfg(target_os = "windows")]
+    {
+        let resp_tx_clone = resp_tx.clone();
+        std::thread::spawn(move || {
+            launch_egui(cmd_rx, resp_tx_clone, running);
+        });
+    }
 
     launch_global_hotkey(cmd_tx.clone());
 
