@@ -15,11 +15,6 @@ static MANAGER: OnceLock<Mutex<SnippetManager>> = OnceLock::new();
 #[cfg(target_os = "linux")]
 static DIALOG_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-fn init_manager() -> Result<(), String> {
-    let manager = SnippetManager::new().map_err(|e| e.to_string())?;
-    MANAGER.set(Mutex::new(manager)).map_err(|_| "Manager already initialized".to_string())
-}
-
 fn generate_password(length: usize) -> String {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
     let mut rng = rand::thread_rng();
@@ -670,7 +665,10 @@ fn main() {
             let _ = MANAGER.set(Mutex::new(manager));
         }
         Err(e) => {
-            eprintln!("Failed to initialize SnippetManager: {}", e);
+            let _ = notify_rust::Notification::new()
+                .summary("Snippet 初始化失败")
+                .body(&format!("无法启动 Snippet 功能: {}", e))
+                .show();
         }
     }
 
