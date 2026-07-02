@@ -283,7 +283,7 @@ mod platform {
         rgba
     }
 
-    pub fn main(_cmd_tx: crossbeam_channel::Sender<UiCommand>) {
+    pub fn main(cmd_tx: crossbeam_channel::Sender<UiCommand>, running: Arc<std::sync::atomic::AtomicBool>) {
         let menu = Menu::new();
 
         // 复制时间菜单项
@@ -336,6 +336,7 @@ mod platform {
             .build()
             .unwrap();
 
+        let running_for_thread = running.clone();
         let menu_channel = MenuEvent::receiver();
         std::thread::spawn(move || {
             loop {
@@ -357,6 +358,14 @@ mod platform {
                         }
                         "sync_snippets" => {
                             if let Ok(manager) = SnippetManager::new() {
+                                if !manager.is_configured() {
+                                    let _ = notify_rust::Notification::new()
+                                        .summary("未配置同步")
+                                        .body("请在 ~/.config/copy-time-tray/config.yaml 中配置同步信息")
+                                        .show();
+                                    continue;
+                                }
+                                
                                 let sync_result = manager.do_pull().and_then(|_| manager.do_push());
                                 match sync_result {
                                     Ok(_) => {
@@ -378,7 +387,7 @@ mod platform {
                             let _ = cmd_tx.send(UiCommand::Show);
                         }
                         "quit" => {
-                            running.store(false, std::sync::atomic::Ordering::SeqCst);
+                            running_for_thread.store(false, std::sync::atomic::Ordering::SeqCst);
                         }
                         _ => {}
                     }
@@ -455,6 +464,11 @@ fn launch_global_hotkey(cmd_tx: crossbeam_channel::Sender<UiCommand>) {
 }
 
 fn handle_ui_response(response: UiResponse) {
+    let manager = match SnippetManager::new() {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+
     match response {
         UiResponse::SnippetCopied(content) => {
             #[cfg(target_os = "linux")]
@@ -474,10 +488,22 @@ fn handle_ui_response(response: UiResponse) {
                 .body(&format!("已复制: {}", &content.chars().take(30).collect::<String>()))
                 .show();
         }
-        UiResponse::SnippetCreated(_)
-        | UiResponse::SnippetUpdated(_)
-        | UiResponse::SnippetDeleted(_)
-        | UiResponse::RequestPull
+        UiResponse::SnippetCreated(snippet) => {
+            let _ = manager.with_store_mut(|store| store.add(snippet.clone()));
+        }
+        UiResponse::SnippetUpdated(snippet) => {
+            let id = snippet.id.clone();
+            let _ = manager.with_store_mut(|store| {
+                store.update(&id, |s| {
+                    s.name = snippet.name.clone();
+                    s.content = snippet.content.clone();
+                })
+            });
+        }
+        UiResponse::SnippetDeleted(id) => {
+            let _ = manager.with_store_mut(|store| store.delete(&id));
+        }
+        UiResponse::RequestPull
         | UiResponse::RequestPush
         | UiResponse::Close => {}
     }
@@ -635,6 +661,23 @@ fn main() {
         let running_clone = running.clone();
         std::thread::spawn(move || {
             launch_egui(cmd_rx, resp_tx_clone, running_clone);
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let cmd_rx_for_linux = cmd_rx;
+        std::thread::spawn(move || {
+            while let Ok(cmd) = cmd_rx_for_linux.recv() {
+                match cmd {
+                    UiCommand::Show => {
+                        let _ = std::thread::spawn(|| {
+                            launch_snippet_dialog_linux(crossbeam_channel::unbounded().0);
+                        });
+                    }
+                    _ => {}
+                }
+            }
         });
     }
 

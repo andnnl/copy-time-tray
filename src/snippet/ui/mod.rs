@@ -3,6 +3,7 @@ use crate::snippet::model::Snippet;
 
 pub mod search;
 pub mod editor;
+#[cfg(target_os = "linux")]
 pub mod config_dialog;
 
 #[derive(Debug, Clone)]
