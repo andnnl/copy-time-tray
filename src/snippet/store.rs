@@ -151,6 +151,31 @@ mod tests {
     }
 
     #[test]
+    fn test_deserialize_real_file() {
+        let path = std::path::PathBuf::from("/home/andnnl/.config/copy-time-tray/snippets.json");
+        if !path.exists() {
+            eprintln!("Skipping: file does not exist");
+            return;
+        }
+        let content = fs::read_to_string(&path).expect("read file");
+        eprintln!("Content (first 200): {}", &content[..content.len().min(200)]);
+        
+        let result: Result<SnippetFile, _> = serde_json::from_str(&content);
+        match result {
+            Ok(file) => {
+                eprintln!("Parsed OK: {} snippets", file.snippets.len());
+                for (i, s) in file.snippets.iter().enumerate() {
+                    eprintln!("  [{}] name='{}' type={:?} deleted={}", i, s.name, s.snippet_type, s.deleted);
+                }
+            }
+            Err(e) => {
+                eprintln!("Parse FAILED: {}", e);
+                panic!("Deserialization failed");
+            }
+        }
+    }
+
+    #[test]
     fn test_new_store_creates_empty_file() {
         let (store, _dir) = temp_store();
         assert_eq!(store.list().len(), 0);

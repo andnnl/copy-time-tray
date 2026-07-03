@@ -26,7 +26,12 @@ impl SnippetManager {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let config = Config::load()?;
         let store_path = Config::config_dir()?.join("snippets.json");
+        eprintln!("[DEBUG] SnippetManager::new() - store_path: {:?}", store_path);
+        eprintln!("[DEBUG] store_path exists: {}", store_path.exists());
+        
         let store = SnippetStore::new(store_path)?;
+        eprintln!("[DEBUG] Store created, snippets count: {}", store.list().len());
+        
         let client = sync::RealHttpClient::new();
 
         let (tx, rx) = unbounded();

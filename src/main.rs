@@ -260,7 +260,7 @@ mod platform {
         });
         menu.append(&sync_item);
 
-        let snippet_item = MenuItem::with_label("搜索 Snippet");
+        let snippet_item = MenuItem::with_label("代码片断");
         let cmd_tx_clone = _cmd_tx.clone();
         snippet_item.connect_activate(move |_| {
             launch_snippet_dialog_linux(cmd_tx_clone.clone());
@@ -360,7 +360,7 @@ mod platform {
         let sync_id = muda::MenuId::new("sync_snippets");
         let sync_item = MenuItem::with_id(sync_id.clone(), "同步 Snippet", true, None);
         let snippet_id = muda::MenuId::new("search_snippets");
-        let snippet_item = MenuItem::with_id(snippet_id.clone(), "搜索 Snippet", true, None);
+        let snippet_item = MenuItem::with_id(snippet_id.clone(), "代码片断", true, None);
         let quit_id = muda::MenuId::new("quit");
         let quit_item = MenuItem::with_id(quit_id.clone(), "退出", true, None);
         menu.append_items(&[&sync_item, &snippet_item, &PredefinedMenuItem::separator(), &quit_item]).unwrap();
@@ -567,7 +567,7 @@ fn spawn_response_handler(resp_rx: crossbeam_channel::Receiver<UiResponse>) {
 }
 
 #[cfg(target_os = "linux")]
-fn show_create_snippet_dialog<'a>() -> Option<(String, String)> {
+fn show_create_snippet_dialog(folders: &[(String, String)]) -> Option<(String, String, Option<String>)> {
     use gtk::prelude::*;
     
     let dialog = gtk::Dialog::with_buttons::<gtk::Window>(
@@ -579,7 +579,7 @@ fn show_create_snippet_dialog<'a>() -> Option<(String, String)> {
             ("创建", gtk::ResponseType::Ok),
         ],
     );
-    dialog.set_default_size(400, 300);
+    dialog.set_default_size(400, 350);
     
     let content = dialog.content_area();
     content.set_spacing(8);
@@ -587,6 +587,17 @@ fn show_create_snippet_dialog<'a>() -> Option<(String, String)> {
     content.set_margin_bottom(10);
     content.set_margin_start(10);
     content.set_margin_end(10);
+    
+    let folder_combo = gtk::ComboBoxText::new();
+    folder_combo.append_text("(根目录)");
+    for (_fid, fname) in folders {
+        folder_combo.append_text(fname);
+    }
+    folder_combo.set_active(Some(0));
+    let folder_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    folder_row.pack_start(&gtk::Label::new(Some("所属目录：")), false, true, 0);
+    folder_row.pack_start(&folder_combo, true, true, 0);
+    content.pack_start(&folder_row, false, true, 0);
     
     let name_label = gtk::Label::new(Some("名称："));
     name_label.set_xalign(0.0);
@@ -614,24 +625,165 @@ fn show_create_snippet_dialog<'a>() -> Option<(String, String)> {
     
     let response = dialog.run();
     
-    if response == gtk::ResponseType::Ok {
+    let result = if response == gtk::ResponseType::Ok {
         let name = name_entry.text().to_string();
         let buffer = content_view.buffer().unwrap();
-        let content = buffer
+        let text = buffer
             .text(&buffer.start_iter(), &buffer.end_iter(), false)
             .unwrap_or_default()
             .to_string();
-        dialog.close();
+        let parent_id = match folder_combo.active() {
+            Some(idx) if idx > 0 => {
+                folders.get(idx as usize - 1).map(|(id, _)| id.clone())
+            }
+            _ => None,
+        };
         
         if name.is_empty() {
-            let _ = dialog.run();
-            return None;
+            None
+        } else {
+            Some((name, text, parent_id))
         }
-        Some((name, content))
     } else {
-        dialog.close();
         None
+    };
+    
+    dialog.close();
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn show_edit_snippet_dialog(
+    existing_name: &str,
+    existing_content: &str,
+    folders: &[(String, String)],
+    current_parent_id: Option<&str>,
+) -> Option<(String, String, Option<String>)> {
+    use gtk::prelude::*;
+    
+    let dialog = gtk::Dialog::with_buttons::<gtk::Window>(
+        Some("编辑 Snippet"),
+        None,
+        gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
+        &[
+            ("取消", gtk::ResponseType::Cancel),
+            ("保存", gtk::ResponseType::Ok),
+        ],
+    );
+    dialog.set_default_size(400, 350);
+    
+    let content = dialog.content_area();
+    content.set_spacing(8);
+    content.set_margin_top(10);
+    content.set_margin_bottom(10);
+    content.set_margin_start(10);
+    content.set_margin_end(10);
+    
+    let folder_combo = gtk::ComboBoxText::new();
+    folder_combo.append_text("(根目录)");
+    for (_fid, fname) in folders {
+        folder_combo.append_text(fname);
     }
+    let initial_parent_idx = match current_parent_id {
+        Some(pid) => {
+            folders.iter().position(|(fid, _)| fid == pid).map(|i| i as u32 + 1).unwrap_or(0)
+        }
+        None => 0,
+    };
+    folder_combo.set_active(Some(initial_parent_idx));
+    let folder_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    folder_row.pack_start(&gtk::Label::new(Some("所属目录：")), false, true, 0);
+    folder_row.pack_start(&folder_combo, true, true, 0);
+    content.pack_start(&folder_row, false, true, 0);
+    
+    let name_label = gtk::Label::new(Some("名称："));
+    name_label.set_xalign(0.0);
+    let name_entry = gtk::Entry::new();
+    name_entry.set_text(existing_name);
+    name_entry.set_placeholder_text(Some("片段名称"));
+    content.pack_start(&name_label, false, true, 0);
+    content.pack_start(&name_entry, false, true, 0);
+    
+    let content_label = gtk::Label::new(Some("内容："));
+    content_label.set_xalign(0.0);
+    content_label.set_margin_top(8);
+    let content_view = gtk::TextView::new();
+    content_view.buffer().unwrap().set_text(existing_content);
+    content_view.set_wrap_mode(gtk::WrapMode::Word);
+    let scrolled = gtk::ScrolledWindow::new(
+        None::<&gtk::Adjustment>,
+        None::<&gtk::Adjustment>,
+    );
+    scrolled.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    scrolled.set_min_content_height(200);
+    scrolled.add(&content_view);
+    content.pack_start(&content_label, false, true, 0);
+    content.pack_start(&scrolled, true, true, 0);
+    
+    content.show_all();
+    
+    let response = dialog.run();
+    
+    let result = if response == gtk::ResponseType::Ok {
+        let name = name_entry.text().to_string();
+        let buffer = content_view.buffer().unwrap();
+        let text = buffer
+            .text(&buffer.start_iter(), &buffer.end_iter(), false)
+            .unwrap_or_default()
+            .to_string();
+        let parent_id = match folder_combo.active() {
+            Some(idx) if idx > 0 => {
+                folders.get(idx as usize - 1).map(|(id, _)| id.clone())
+            }
+            _ => None,
+        };
+        
+        if name.is_empty() {
+            None
+        } else {
+            Some((name, text, parent_id))
+        }
+    } else {
+        None
+    };
+    
+    dialog.close();
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn show_delete_snippet_dialog(name: &str) -> bool {
+    use gtk::prelude::*;
+    
+    let dialog = gtk::Dialog::with_buttons::<gtk::Window>(
+        Some("确认删除"),
+        None,
+        gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
+        &[
+            ("取消", gtk::ResponseType::Cancel),
+            ("删除", gtk::ResponseType::Ok),
+        ],
+    );
+    dialog.set_default_size(300, 100);
+    
+    let content = dialog.content_area();
+    content.set_spacing(8);
+    content.set_margin_top(20);
+    content.set_margin_bottom(20);
+    content.set_margin_start(20);
+    content.set_margin_end(20);
+    
+    let message = format!("确定要删除 '{}' 吗？", name);
+    let label = gtk::Label::new(Some(&message));
+    label.set_xalign(0.5);
+    content.pack_start(&label, false, true, 0);
+    
+    content.show_all();
+    
+    let response = dialog.run();
+    dialog.close();
+    
+    response == gtk::ResponseType::Ok
 }
 
 #[cfg(target_os = "linux")]
@@ -642,156 +794,393 @@ fn launch_snippet_dialog_linux(
     use snippet::model::SnippetType;
 
     let dialog = gtk::Dialog::with_buttons::<gtk::Window>(
-        Some("搜索 Snippet"),
+        Some("Snippet 管理器"),
         None,
         gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
         &[("关闭", gtk::ResponseType::Close)],
     );
-    dialog.set_default_size(500, 350);
+    dialog.set_default_size(800, 550);
 
     let content = dialog.content_area();
 
     let entry = gtk::SearchEntry::new();
     entry.set_placeholder_text(Some("搜索片段..."));
+    entry.set_margin_bottom(6);
     content.pack_start(&entry, false, true, 4);
 
-    let scrolled = gtk::ScrolledWindow::new(
+    let hpaned = gtk::Paned::new(gtk::Orientation::Horizontal);
+    hpaned.set_position(280);
+
+    let left_scroll = gtk::ScrolledWindow::new(
         None::<&gtk::Adjustment>,
         None::<&gtk::Adjustment>,
     );
-    scrolled.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-    let list_box = gtk::ListBox::new();
-    list_box.set_selection_mode(gtk::SelectionMode::Single);
-    scrolled.add(&list_box);
-    content.pack_start(&scrolled, true, true, 4);
+    left_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+
+    let store = gtk::TreeStore::new(&[
+        String::static_type(),  // 0: id
+        String::static_type(),  // 1: name
+        String::static_type(),  // 2: content
+        bool::static_type(),    // 3: is_folder
+        String::static_type(),  // 4: icon_name
+    ]);
 
     let snippets = match MANAGER.get().and_then(|m| m.lock().ok()) {
-        Some(manager_guard) => {
-            let manager = &*manager_guard;
-            match manager.with_store(|store| {
-                let snippets = store.list();
-                snippets.to_vec()
-            }) {
-                Ok(snippets) => {
-                    eprintln!("[DEBUG] Loaded {} snippets from store", snippets.len());
-                    snippets
-                },
-                Err(e) => {
-                    eprintln!("[ERROR] Failed to access store: {}", e);
-                    Vec::new()
-                }
-            }
-        }
-        None => {
-            eprintln!("[ERROR] Failed to access manager");
-            Vec::new()
-        }
+        Some(guard) => guard
+            .with_store(|s| s.list().to_vec())
+            .unwrap_or_default(),
+        None => Vec::new(),
     };
 
-    let mut snippet_count = 0;
-    for snippet in &snippets {
-        eprintln!("[DEBUG] Processing snippet: name='{}', type={:?}, deleted={}", 
-            snippet.name, snippet.snippet_type, snippet.deleted);
-        if snippet.deleted {
-            eprintln!("[DEBUG] Skipping deleted snippet: {}", snippet.name);
-            continue;
+    let folders: Vec<_> = snippets
+        .iter()
+        .filter(|s| !s.deleted && s.snippet_type == SnippetType::Folder)
+        .collect();
+    let root_snippets: Vec<_> = snippets
+        .iter()
+        .filter(|s| !s.deleted && s.snippet_type == SnippetType::Snippet && s.parent_id.is_none())
+        .collect();
+
+    for folder in &folders {
+        let parent_iter = store.insert_with_values(None, None, &[
+            (0, &folder.id),
+            (1, &folder.name),
+            (2, &""),
+            (3, &true),
+            (4, &"folder-symbolic"),
+        ]);
+        for s in &root_snippets {
+            if s.parent_id.as_deref() == Some(&folder.id) {
+                store.insert_with_values(Some(&parent_iter), None, &[
+                    (0, &s.id),
+                    (1, &s.name),
+                    (2, &s.content.clone().unwrap_or_default()),
+                    (3, &false),
+                    (4, &"text-x-script-symbolic"),
+                ]);
+            }
         }
-        if snippet.snippet_type != SnippetType::Snippet {
-            eprintln!("[DEBUG] Skipping non-snippet type: {}", snippet.name);
-            continue;
-        }
-        let row = gtk::ListBoxRow::new();
-        let label = gtk::Label::new(Some(&snippet.name));
-        label.set_xalign(0.0);
-        label.set_margin_start(6);
-        row.add(&label);
-        let preview: String = snippet
-            .content
-            .as_deref()
-            .unwrap_or("")
-            .chars()
-            .take(60)
-            .collect();
-        row.set_tooltip_text(Some(&preview));
-        list_box.add(&row);
-        snippet_count += 1;
     }
 
-    if snippet_count == 0 {
-        let empty_label = gtk::Label::new(Some("暂无数据，请先创建 snippet"));
-        empty_label.set_justify(gtk::Justification::Center);
-        empty_label.set_margin_top(20);
-        empty_label.set_margin_bottom(20);
-        empty_label.style_context().add_class("dim-label");
-        content.pack_start(&empty_label, true, true, 0);
+    for s in &root_snippets {
+        if s.parent_id.is_none() || !folders.iter().any(|f| Some(&f.id) == s.parent_id.as_ref()) {
+            store.insert_with_values(None, None, &[
+                (0, &s.id),
+                (1, &s.name),
+                (2, &s.content.clone().unwrap_or_default()),
+                (3, &false),
+                (4, &"text-x-script-symbolic"),
+            ]);
+        }
     }
 
-    let button_box = gtk::ButtonBox::new(gtk::Orientation::Horizontal);
-    button_box.set_layout(gtk::ButtonBoxStyle::End);
-    button_box.set_margin_top(8);
-    let new_button = gtk::Button::with_label("新增");
+    let tree_view = gtk::TreeView::with_model(&store);
+    tree_view.set_headers_visible(false);
+    let column = gtk::TreeViewColumn::new();
+    let icon_renderer = gtk::CellRendererPixbuf::new();
+    let text_renderer = gtk::CellRendererText::new();
+    gtk::prelude::TreeViewColumnExt::pack_start(&column, &icon_renderer, false);
+    gtk::prelude::TreeViewColumnExt::pack_start(&column, &text_renderer, true);
+    gtk::prelude::CellLayoutExt::add_attribute(&column, &icon_renderer, "icon-name", 4);
+    gtk::prelude::CellLayoutExt::add_attribute(&column, &text_renderer, "text", 1);
+    tree_view.append_column(&column);
+    left_scroll.add(&tree_view);
+
+    let right_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    let right_label = gtk::Label::new(Some("预览"));
+    right_label.set_xalign(0.0);
+    right_label.style_context().add_class("dim-label");
+    right_box.pack_start(&right_label, false, true, 0);
+
+    let preview_scroll = gtk::ScrolledWindow::new(
+        None::<&gtk::Adjustment>,
+        None::<&gtk::Adjustment>,
+    );
+    preview_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    let preview_text = gtk::TextView::new();
+    preview_text.set_editable(false);
+    preview_text.set_cursor_visible(false);
+    preview_text.set_wrap_mode(gtk::WrapMode::Word);
+    preview_text.set_monospace(true);
+    preview_scroll.add(&preview_text);
+    right_box.pack_start(&preview_scroll, true, true, 0);
+
+    hpaned.pack1(&left_scroll, true, true);
+    hpaned.pack2(&right_box, true, true);
+    content.pack_start(&hpaned, true, true, 0);
+
+    let new_button = gtk::Button::with_label("新增 Snippet");
     new_button.style_context().add_class("suggested-action");
-    button_box.pack_start(&new_button, false, true, 0);
-    content.pack_start(&button_box, false, true, 4);
+    let new_folder_button = gtk::Button::with_label("新增上级目录");
+    let edit_button = gtk::Button::with_label("编辑");
+    let delete_button = gtk::Button::with_label("删除");
+    delete_button.style_context().add_class("destructive-action");
+    let copy_button = gtk::Button::with_label("复制");
+    copy_button.style_context().add_class("suggested-action");
+    copy_button.set_sensitive(false);
+
+    let btn_box = gtk::ButtonBox::new(gtk::Orientation::Horizontal);
+    btn_box.set_layout(gtk::ButtonBoxStyle::End);
+    btn_box.set_spacing(6);
+    btn_box.set_margin_top(6);
+    btn_box.pack_start(&new_folder_button, false, true, 0);
+    btn_box.pack_start(&new_button, false, true, 0);
+    btn_box.pack_start(&edit_button, false, true, 0);
+    btn_box.pack_start(&delete_button, false, true, 0);
+    btn_box.pack_start(&copy_button, false, true, 0);
+    content.pack_start(&btn_box, false, true, 0);
 
     content.show_all();
 
-    let list_box_clone = list_box.clone();
-    entry.connect_changed(move |e| {
-        let text = e.text().to_string().to_lowercase();
-        for child in list_box_clone.children() {
-            if let Some(row) = child.downcast_ref::<gtk::ListBoxRow>() {
-                if let Some(c) = row.child() {
-                    if let Some(lbl) = c.downcast_ref::<gtk::Label>() {
-                        let name = lbl.text().to_lowercase();
-                        row.set_visible(text.is_empty() || name.contains(&text));
+    let target_entry = gtk::TargetEntry::new("SNIPPET_ID", gtk::TargetFlags::empty(), 0);
+    let drop_tree_view = tree_view.clone();
+    tree_view.drag_source_set(
+        gtk::gdk::ModifierType::BUTTON1_MASK,
+        &[target_entry.clone()],
+        gtk::gdk::DragAction::MOVE,
+    );
+    tree_view.connect_drag_data_get(move |_, _, data, info, _| {
+        if info == 0 {
+            let tv = drop_tree_view.clone();
+            if let Some(sel) = tv.selection().selected() {
+                let (model, iter) = sel;
+                if let Some(ts) = model.downcast_ref::<gtk::TreeStore>() {
+                    let is_folder: bool = ts.value(&iter, 3).get::<bool>().unwrap_or_default();
+                    if is_folder { return; }
+                    let id: String = ts.value(&iter, 0).get::<String>().unwrap_or_default();
+                    data.set_text(&id);
+                }
+            }
+        }
+    });
+    let dest_tree_view = tree_view.clone();
+    tree_view.drag_dest_set(
+        gtk::DestDefaults::ALL,
+        &[target_entry],
+        gtk::gdk::DragAction::MOVE,
+    );
+    tree_view.connect_drag_data_received(move |_tv, _dc, x, y, data, info, _| {
+        if info != 0 { return; }
+        let dragged_id = match data.text() {
+            Some(t) => t.to_string(),
+            None => return,
+        };
+        let tree_x = x as i32;
+        let tree_y = y as i32;
+        let path_opt = dest_tree_view.path_at_pos(tree_x, tree_y);
+        match path_opt {
+            Some((Some(path), _, _, _)) => {
+                let model = dest_tree_view.model().unwrap();
+                let ts = match model.downcast_ref::<gtk::TreeStore>() {
+                    Some(m) => m,
+                    None => return,
+                };
+                if let Some(iter) = ts.iter(&path) {
+                    let target_is_folder: bool = ts.value(&iter, 3).get::<bool>().unwrap_or_default();
+                    if !target_is_folder { return; }
+                    let target_id: String = ts.value(&iter, 0).get::<String>().unwrap_or_default();
+                    if let Some(manager) = MANAGER.get().and_then(|m| m.lock().ok()) {
+                        let _ = manager.with_store_mut(|s| {
+                            let _ = s.update(&dragged_id, |snip| {
+                                snip.parent_id = Some(target_id);
+                            });
+                        });
                     }
+                }
+            }
+            _ => {
+                if let Some(manager) = MANAGER.get().and_then(|m| m.lock().ok()) {
+                    let _ = manager.with_store_mut(|s| {
+                        let _ = s.update(&dragged_id, |snip| {
+                            snip.parent_id = None;
+                        });
+                    });
                 }
             }
         }
     });
 
-    let dialog_clone = dialog.clone();
-    list_box.connect_row_activated(move |_, row| {
-        let preview = row
-            .tooltip_text()
-            .unwrap_or_default();
-        let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
-        clipboard.set_text(&preview);
-        clipboard.store();
-        let _ = notify_rust::Notification::new()
-            .summary("Snippet Copied")
-            .body(&format!("已复制: {}", &preview.chars().take(30).collect::<String>()))
-            .show();
-        dialog_clone.response(gtk::ResponseType::Close);
+    let selection = tree_view.selection();
+    selection.set_mode(gtk::SelectionMode::Single);
+
+    let preview_text_ref = preview_text.clone();
+    let copy_button_ref = copy_button.clone();
+    let selected_content: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let selected_id: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let selected_is_folder: std::sync::Arc<std::sync::Mutex<Option<bool>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let selected_name: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+
+    let sc_clone = selected_content.clone();
+    let si_clone = selected_id.clone();
+    let sf_clone = selected_is_folder.clone();
+    let sn_clone = selected_name.clone();
+    selection.connect_changed(move |sel| {
+        if let Some((model, iter)) = sel.selected() {
+            if let Some(tree_store) = model.downcast_ref::<gtk::TreeStore>() {
+                let id: String = tree_store.value(&iter, 0).get::<String>().unwrap_or_default();
+                let name: String = tree_store.value(&iter, 1).get::<String>().unwrap_or_default();
+                let content: String = tree_store.value(&iter, 2).get::<String>().unwrap_or_default();
+                let is_folder: bool = tree_store.value(&iter, 3).get::<bool>().unwrap_or_default();
+                *sc_clone.lock().unwrap() = Some(content.clone());
+                *si_clone.lock().unwrap() = Some(id);
+                *sf_clone.lock().unwrap() = Some(is_folder);
+                *sn_clone.lock().unwrap() = Some(name);
+                if is_folder {
+                    if let Some(buffer) = preview_text_ref.buffer() { buffer.set_text("(文件夹)"); }
+                    copy_button_ref.set_sensitive(false);
+                } else {
+                    if let Some(buffer) = preview_text_ref.buffer() { buffer.set_text(&content); }
+                    copy_button_ref.set_sensitive(true);
+                }
+            }
+        }
     });
 
-    entry.set_activates_default(true);
-    
-    let dialog_close = dialog.clone();
-    new_button.connect_clicked(move |_| {
-        dialog_close.response(gtk::ResponseType::Accept);
+    let dialog_for_copy = dialog.clone();
+    let sc_for_copy = selected_content.clone();
+    copy_button.connect_clicked(move |_| {
+        let content = sc_for_copy.lock().unwrap().clone();
+        if let Some(c) = content {
+            let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
+            clipboard.set_text(&c);
+            clipboard.store();
+            let _ = notify_rust::Notification::new()
+                .summary("Snippet Copied")
+                .body(&format!("已复制: {}", c.chars().take(30).collect::<String>()))
+                .show();
+            if let Some(d) = dialog_for_copy.downcast_ref::<gtk::Dialog>() { d.response(gtk::ResponseType::Close); }
+        }
     });
-    
+
+    let dialog_for_new_folder = dialog.clone();
+    new_folder_button.connect_clicked(move |_| {
+        if let Some(d) = dialog_for_new_folder.downcast_ref::<gtk::Dialog>() { d.response(gtk::ResponseType::Accept); }
+    });
+
+    let dialog_for_new_snippet = dialog.clone();
+    new_button.connect_clicked(move |_| {
+        if let Some(d) = dialog_for_new_snippet.downcast_ref::<gtk::Dialog>() { d.response(gtk::ResponseType::Apply); }
+    });
+
+    let dialog_for_edit = dialog.clone();
+    let si_for_edit = selected_id.clone();
+    let sf_for_edit = selected_is_folder.clone();
+    let sn_for_edit = selected_name.clone();
+    let sc_for_edit = selected_content.clone();
+    edit_button.connect_clicked(move |_| {
+        let is_folder = sf_for_edit.lock().unwrap().unwrap_or(false);
+        let id_opt = si_for_edit.lock().unwrap().clone();
+        if let Some(_id) = id_opt {
+            if is_folder {
+                return;
+            }
+            let name = sn_for_edit.lock().unwrap().clone().unwrap_or_default();
+            let content = sc_for_edit.lock().unwrap().clone().unwrap_or_default();
+            let folders_data: Vec<(String, String)> = if let Some(mg) = MANAGER.get().and_then(|m| m.lock().ok()) {
+                mg.with_store(|s| {
+                    s.list().iter()
+                        .filter(|sn| !sn.deleted && sn.snippet_type == SnippetType::Folder)
+                        .map(|sn| (sn.id.clone(), sn.name.clone()))
+                        .collect()
+                }).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let parent_id_opt: Option<String> = if let Some(mg) = MANAGER.get().and_then(|m| m.lock().ok()) {
+                mg.with_store(|s| {
+                    s.get(&_id).map(|sn| sn.parent_id.clone()).flatten()
+                }).ok().flatten()
+            } else {
+                None
+            };
+            if let Some(d) = dialog_for_edit.downcast_ref::<gtk::Dialog>() { d.response(gtk::ResponseType::Close); }
+            if let Some((new_name, new_content, new_parent_id)) = show_edit_snippet_dialog(&name, &content, &folders_data, parent_id_opt.as_deref()) {
+                if let Some(manager_guard) = MANAGER.get().and_then(|m| m.lock().ok()) {
+                    let manager = &*manager_guard;
+                    let _ = manager.with_store_mut(|store| {
+                        store.update(&_id, |s| {
+                            s.name = new_name.clone();
+                            s.content = Some(new_content.clone());
+                            s.parent_id = new_parent_id.clone();
+                        })
+                    });
+                    let _ = notify_rust::Notification::new()
+                        .summary("Snippet 已更新")
+                        .body(&format!("'{}' 已保存", new_name))
+                        .show();
+                }
+            }
+        }
+    });
+
+    let dialog_for_del = dialog.clone();
+    let si_for_del = selected_id.clone();
+    let sn_for_del = selected_name.clone();
+    let sf_for_del = selected_is_folder.clone();
+    delete_button.connect_clicked(move |_| {
+        let is_folder = sf_for_del.lock().unwrap().unwrap_or(false);
+        let id_opt = si_for_del.lock().unwrap().clone();
+        let name_opt = sn_for_del.lock().unwrap().clone();
+        if let (Some(id), Some(name)) = (id_opt, name_opt) {
+            if show_delete_snippet_dialog(&name) {
+                if let Some(d) = dialog_for_del.downcast_ref::<gtk::Dialog>() { d.response(gtk::ResponseType::Close); }
+                if let Some(manager_guard) = MANAGER.get().and_then(|m| m.lock().ok()) {
+                    let manager = &*manager_guard;
+                    let _ = manager.with_store_mut(|store| store.delete(&id));
+                    let _ = notify_rust::Notification::new()
+                        .summary("Snippet 已删除")
+                        .body(&format!("'{}' 已删除", name))
+                        .show();
+                }
+            }
+        }
+    });
+
     let response = dialog.run();
-    
+    dialog.hide();
+
     if response == gtk::ResponseType::Accept {
-        dialog.hide();
-        if let Some((name, text_content)) = show_create_snippet_dialog() {
-            if let Some(manager_guard) = MANAGER.get().and_then(|m| m.lock().ok()) {
-                let manager = &*manager_guard;
-                let snippet = crate::snippet::model::Snippet {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    parent_id: None,
-                    name: name.clone(),
-                    snippet_type: SnippetType::Snippet,
-                    content: Some(text_content),
-                    sort: 0,
-                    deleted: false,
-                    synced: false,
-                    create_date: chrono::Utc::now(),
-                    update_date: chrono::Utc::now(),
-                };
+        let name_input = gtk::Dialog::with_buttons::<gtk::Window>(
+            Some("新增上级目录"),
+            None,
+            gtk::DialogFlags::MODAL,
+            &[("取消", gtk::ResponseType::Cancel), ("创建", gtk::ResponseType::Ok)],
+        );
+        let entry = gtk::Entry::new();
+        entry.set_placeholder_text(Some("目录名称"));
+        let ca = name_input.content_area();
+        ca.set_margin_start(10);
+        ca.set_margin_end(10);
+        ca.add(&entry);
+        ca.show_all();
+        if name_input.run() == gtk::ResponseType::Ok {
+            let folder_name = entry.text().to_string();
+            if !folder_name.is_empty() {
+                if let Some(mg) = MANAGER.get().and_then(|m| m.lock().ok()) {
+                    let manager = &*mg;
+                    let folder = crate::snippet::model::Snippet::new_folder(folder_name.clone(), None);
+                    let _ = manager.with_store_mut(|store| store.add(folder));
+                    let _ = notify_rust::Notification::new()
+                        .summary("目录已创建")
+                        .body(&format!("'{}' 已保存", folder_name))
+                        .show();
+                }
+            }
+        }
+        name_input.close();
+    } else if response == gtk::ResponseType::Apply {
+        let folder_data: Vec<(String, String)> = folders
+            .iter()
+            .map(|f| (f.id.clone(), f.name.clone()))
+            .collect();
+        if let Some((name, text_content, parent_id)) = show_create_snippet_dialog(&folder_data) {
+            if let Some(mg) = MANAGER.get().and_then(|m| m.lock().ok()) {
+                let manager = &*mg;
+                let snippet = crate::snippet::model::Snippet::new_snippet(name.clone(), text_content, parent_id);
                 if let Err(e) = manager.with_store_mut(|store| store.add(snippet)) {
                     let _ = notify_rust::Notification::new()
                         .summary("创建失败")
@@ -806,8 +1195,6 @@ fn launch_snippet_dialog_linux(
             }
         }
     }
-    
-    dialog.hide();
 }
 
 #[allow(unused_variables)]
