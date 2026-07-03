@@ -567,6 +567,74 @@ fn spawn_response_handler(resp_rx: crossbeam_channel::Receiver<UiResponse>) {
 }
 
 #[cfg(target_os = "linux")]
+fn show_create_snippet_dialog<'a>() -> Option<(String, String)> {
+    use gtk::prelude::*;
+    
+    let dialog = gtk::Dialog::with_buttons::<gtk::Window>(
+        Some("新建 Snippet"),
+        None,
+        gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
+        &[
+            ("取消", gtk::ResponseType::Cancel),
+            ("创建", gtk::ResponseType::Ok),
+        ],
+    );
+    dialog.set_default_size(400, 300);
+    
+    let content = dialog.content_area();
+    content.set_spacing(8);
+    content.set_margin_top(10);
+    content.set_margin_bottom(10);
+    content.set_margin_start(10);
+    content.set_margin_end(10);
+    
+    let name_label = gtk::Label::new(Some("名称："));
+    name_label.set_xalign(0.0);
+    let name_entry = gtk::Entry::new();
+    name_entry.set_placeholder_text(Some("片段名称"));
+    content.pack_start(&name_label, false, true, 0);
+    content.pack_start(&name_entry, false, true, 0);
+    
+    let content_label = gtk::Label::new(Some("内容："));
+    content_label.set_xalign(0.0);
+    content_label.set_margin_top(8);
+    let content_view = gtk::TextView::new();
+    content_view.set_wrap_mode(gtk::WrapMode::Word);
+    let scrolled = gtk::ScrolledWindow::new(
+        None::<&gtk::Adjustment>,
+        None::<&gtk::Adjustment>,
+    );
+    scrolled.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    scrolled.set_min_content_height(200);
+    scrolled.add(&content_view);
+    content.pack_start(&content_label, false, true, 0);
+    content.pack_start(&scrolled, true, true, 0);
+    
+    content.show_all();
+    
+    let response = dialog.run();
+    
+    if response == gtk::ResponseType::Ok {
+        let name = name_entry.text().to_string();
+        let buffer = content_view.buffer().unwrap();
+        let content = buffer
+            .text(&buffer.start_iter(), &buffer.end_iter(), false)
+            .unwrap_or_default()
+            .to_string();
+        dialog.close();
+        
+        if name.is_empty() {
+            let _ = dialog.run();
+            return None;
+        }
+        Some((name, content))
+    } else {
+        dialog.close();
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn launch_snippet_dialog_linux(
     _cmd_tx: crossbeam_channel::Sender<UiCommand>,
 ) {
@@ -658,6 +726,14 @@ fn launch_snippet_dialog_linux(
         content.pack_start(&empty_label, true, true, 0);
     }
 
+    let button_box = gtk::ButtonBox::new(gtk::Orientation::Horizontal);
+    button_box.set_layout(gtk::ButtonBoxStyle::End);
+    button_box.set_margin_top(8);
+    let new_button = gtk::Button::with_label("新增");
+    new_button.style_context().add_class("suggested-action");
+    button_box.pack_start(&new_button, false, true, 0);
+    content.pack_start(&button_box, false, true, 4);
+
     content.show_all();
 
     let list_box_clone = list_box.clone();
@@ -691,7 +767,46 @@ fn launch_snippet_dialog_linux(
     });
 
     entry.set_activates_default(true);
-    let _ = dialog.run();
+    
+    let dialog_close = dialog.clone();
+    new_button.connect_clicked(move |_| {
+        dialog_close.response(gtk::ResponseType::Accept);
+    });
+    
+    let response = dialog.run();
+    
+    if response == gtk::ResponseType::Accept {
+        dialog.hide();
+        if let Some((name, text_content)) = show_create_snippet_dialog() {
+            if let Some(manager_guard) = MANAGER.get().and_then(|m| m.lock().ok()) {
+                let manager = &*manager_guard;
+                let snippet = crate::snippet::model::Snippet {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    parent_id: None,
+                    name: name.clone(),
+                    snippet_type: SnippetType::Snippet,
+                    content: Some(text_content),
+                    sort: 0,
+                    deleted: false,
+                    synced: false,
+                    create_date: chrono::Utc::now(),
+                    update_date: chrono::Utc::now(),
+                };
+                if let Err(e) = manager.with_store_mut(|store| store.add(snippet)) {
+                    let _ = notify_rust::Notification::new()
+                        .summary("创建失败")
+                        .body(&format!("{}", e))
+                        .show();
+                } else {
+                    let _ = notify_rust::Notification::new()
+                        .summary("Snippet 已创建")
+                        .body(&format!("'{}' 已保存", name))
+                        .show();
+                }
+            }
+        }
+    }
+    
     dialog.hide();
 }
 
