@@ -5,6 +5,9 @@ pub mod search;
 pub mod editor;
 #[cfg(target_os = "linux")]
 pub mod config_dialog;
+#[cfg(target_os = "linux")]
+pub mod config_window;
+pub mod tabs;
 
 #[derive(Debug, Clone)]
 pub enum UiCommand {
