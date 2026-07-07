@@ -92,6 +92,7 @@ pub struct SyncTab {
     pub gh_token_entry: gtk::Entry,
     pub gitee_api_entry: gtk::Entry,
     pub gitee_token_entry: gtk::Entry,
+    pub gitee_gist_desc_entry: gtk::Entry,
     status_label: gtk::Label,
     history_box: gtk::Box,
     history_expander: gtk::Expander,
@@ -159,9 +160,12 @@ impl SyncTab {
         let gitee_api_entry = Self::create_entry("Gitee API 地址");
         gitee_api_entry.set_text("https://gitee.com/api/v5");
         let gitee_token_entry = Self::create_password_entry("Gitee 私人令牌");
+        let gitee_gist_desc_entry = Self::create_entry("Gist 描述名称");
+        gitee_gist_desc_entry.set_text("CopyTimeTrayConfig");
 
         gitee_box.pack_start(&Self::create_row("API Base:", &gitee_api_entry), false, false, 0);
         gitee_box.pack_start(&Self::create_row("Token:", &gitee_token_entry), false, false, 0);
+        gitee_box.pack_start(&Self::create_row("Gist 名称:", &gitee_gist_desc_entry), false, false, 0);
 
         // Gitee test connection button
         let gitee_test_button = gtk::Button::with_label("测试连接");
@@ -241,6 +245,7 @@ impl SyncTab {
             gh_token_entry,
             gitee_api_entry,
             gitee_token_entry,
+            gitee_gist_desc_entry,
             status_label,
             history_box,
             history_expander,
@@ -378,8 +383,12 @@ impl ConfigTab for SyncTab {
             SyncProvider::Gitee => {
                 let api_base = self.gitee_api_entry.text().to_string();
                 let token = self.gitee_token_entry.text().to_string();
+                let gist_desc = self.gitee_gist_desc_entry.text().to_string();
                 if api_base.is_empty() || token.is_empty() {
                     return Err("请填写 API 地址和令牌".to_string());
+                }
+                if gist_desc.is_empty() {
+                    return Err("请填写 Gist 名称".to_string());
                 }
             }
         }
@@ -403,6 +412,7 @@ impl ConfigTab for SyncTab {
                     self.provider_combo.set_active(Some(1));
                     self.gitee_api_entry.set_text(&sync_config.gitee_config.api_base);
                     self.gitee_token_entry.set_text(&sync_config.gitee_config.token);
+                    self.gitee_gist_desc_entry.set_text(&sync_config.gitee_config.gist_description);
                 }
             }
         }

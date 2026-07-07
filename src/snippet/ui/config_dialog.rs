@@ -232,6 +232,8 @@ pub fn show_config_dialog(parent: Option<&gtk::Window>) -> Option<ConfigDialogRe
                         token,
                         auto_sync: true,
                         sync_interval: 300,
+                        gist_id: None,
+                        gist_description: "CopyTimeTrayConfig".to_string(),
                     },
                 })
             }

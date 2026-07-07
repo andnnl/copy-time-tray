@@ -164,57 +164,71 @@ pub fn generate_file_id_from_path(relative_path: &str) -> String {
 pub fn pull(config: &SyncConfig, client: &dyn HttpClient) -> Result<Vec<Snippet>, SyncError> {
     match config.provider {
         SyncProvider::Gitee => {
-            let gitee_client = GiteeClient::new(config.gitee_config.clone());
-            let gists = gitee_client
-                .list_gists()
-                .map_err(|e| SyncError::Http(e.to_string()))?;
-
-            let mut snippets = Vec::new();
-            for gist in gists {
-                let folder_name = gist.description.as_deref().unwrap_or("_default");
-                let folder_id = generate_gist_folder_id(&gist.id);
-                let folder = Snippet {
-                    id: folder_id.clone(),
-                    parent_id: None,
-                    name: folder_name.to_string(),
-                    snippet_type: crate::snippet::model::SnippetType::Folder,
-                    content: None,
-                    sort: 0,
-                    deleted: false,
-                    synced: true,
-                    create_date: gist.created_at,
-                    update_date: gist.updated_at,
-                    gitee_gist_id: Some(gist.id.clone()),
-                };
-                snippets.push(folder);
-
-                for (filename, file) in gist.files {
-                    let name = filename.strip_suffix(".sh").unwrap_or(&filename).to_string();
-                    let content = file.content.unwrap_or_default();
-                    let file_id = generate_file_id_from_path(&format!("{}/{}", gist.id, filename));
-                    let snippet = Snippet {
-                        id: file_id,
-                        parent_id: Some(folder_id.clone()),
-                        name,
-                        snippet_type: crate::snippet::model::SnippetType::Snippet,
-                        content: Some(content),
-                        sort: 0,
-                        deleted: false,
-                        synced: true,
-                        create_date: gist.created_at,
-                        update_date: gist.updated_at,
-                        gitee_gist_id: None,
-                    };
-                    snippets.push(snippet);
-                }
-            }
-
-            Ok(snippets)
+            pull_gitee(config)
         }
         SyncProvider::Github => {
             pull_github(config, client)
         }
     }
+}
+
+fn pull_gitee(config: &SyncConfig) -> Result<Vec<Snippet>, SyncError> {
+    let gitee_client = GiteeClient::new(config.gitee_config.clone());
+    let gists = gitee_client
+        .list_gists()
+        .map_err(|e| SyncError::Http(e.to_string()))?;
+
+    let target_description = &config.gitee_config.gist_description;
+    
+    // Find the target Gist by description
+    let target_gist = gists.iter().find(|g| {
+        g.description.as_deref() == Some(target_description)
+    });
+
+    let mut snippets = Vec::new();
+    
+    if let Some(gist) = target_gist {
+        // Create folder from the Gist
+        let folder_name = gist.description.as_deref().unwrap_or("_default");
+        let folder_id = generate_gist_folder_id(&gist.id);
+        let folder = Snippet {
+            id: folder_id.clone(),
+            parent_id: None,
+            name: folder_name.to_string(),
+            snippet_type: crate::snippet::model::SnippetType::Folder,
+            content: None,
+            sort: 0,
+            deleted: false,
+            synced: true,
+            create_date: gist.created_at,
+            update_date: gist.updated_at,
+            gitee_gist_id: Some(gist.id.clone()),
+        };
+        snippets.push(folder);
+
+        // Create snippets from each file in the Gist
+        for (filename, file) in &gist.files {
+            let name = filename.strip_suffix(".sh").unwrap_or(filename).to_string();
+            let content = file.content.as_deref().unwrap_or("").to_string();
+            let file_id = generate_file_id_from_path(&format!("{}/{}", gist.id, filename));
+            let snippet = Snippet {
+                id: file_id,
+                parent_id: Some(folder_id.clone()),
+                name,
+                snippet_type: crate::snippet::model::SnippetType::Snippet,
+                content: Some(content),
+                sort: 0,
+                deleted: false,
+                synced: true,
+                create_date: gist.created_at,
+                update_date: gist.updated_at,
+                gitee_gist_id: None,
+            };
+            snippets.push(snippet);
+        }
+    }
+
+    Ok(snippets)
 }
 
 fn pull_github(
@@ -340,66 +354,64 @@ fn push_gitee(
     let gitee_client = GiteeClient::new(config.gitee_config.clone());
     let mut failed_ids = Vec::new();
 
-    let mut groups: HashMap<Option<String>, Vec<&Snippet>> = HashMap::new();
-    for snippet in snippets {
-        if snippet.snippet_type == crate::snippet::model::SnippetType::Folder {
-            continue;
-        }
-        groups.entry(snippet.parent_id.clone()).or_default().push(snippet);
-    }
-
-    let folders: HashMap<String, &Snippet> = snippets
+    // Filter out folders, only push snippets
+    let snippet_list: Vec<&Snippet> = snippets
         .iter()
-        .filter(|s| s.snippet_type == crate::snippet::model::SnippetType::Folder)
-        .map(|s| (s.id.clone(), s))
+        .filter(|s| s.snippet_type == crate::snippet::model::SnippetType::Snippet)
         .collect();
 
-    for (parent_id, group_snippets) in groups {
-        let folder = parent_id
-            .as_ref()
-            .and_then(|pid| folders.get(pid));
-        let gist_id = folder.and_then(|f| f.gitee_gist_id.clone());
-        let folder_name = folder.map(|f| f.name.as_str()).unwrap_or("_default");
+    if snippet_list.is_empty() {
+        return Ok(Vec::new());
+    }
 
-        if let Some(gist_id) = gist_id {
-            let mut filenames = Vec::new();
-            let mut contents = Vec::new();
-            for snippet in &group_snippets {
-                filenames.push(format!("{}.sh", snippet.name));
-                contents.push(snippet.content.as_deref().unwrap_or(""));
-            }
-            let mut update = GistUpdate::new(Some(folder_name));
-            for (filename, content) in filenames.iter().zip(contents.iter()) {
-                update = update.add_file(filename, content);
-            }
-            match gitee_client.update_gist(&gist_id, &update) {
-                Ok(_) => {}
-                Err(e) => {
-                    log::warn!("Update gist failed: {}", e);
-                    failed_ids.extend(group_snippets.iter().map(|s| s.id.clone()));
-                }
-            }
-        } else {
-            let mut files = HashMap::new();
-            for snippet in &group_snippets {
-                let filename = format!("{}.sh", snippet.name);
-                files.insert(
-                    filename,
-                    GistFileCreate::new(snippet.content.as_deref()),
-                );
-            }
+    // Find existing gist or create new one
+    let gists = gitee_client
+        .list_gists()
+        .map_err(|e| SyncError::Http(e.to_string()))?;
+
+    let target_description = &config.gitee_config.gist_description;
+    let existing_gist = gists.iter().find(|g| {
+        g.description.as_deref() == Some(target_description)
+    });
+
+    let gist_id = match existing_gist {
+        Some(gist) => gist.id.clone(),
+        None => {
+            // Create new gist
             let create = GistCreate {
-                description: Some(folder_name),
-                files,
+                description: Some(target_description),
+                files: HashMap::new(),
                 public: false,
             };
             match gitee_client.create_gist(&create) {
-                Ok(_) => {}
+                Ok(gist) => gist.id,
                 Err(e) => {
                     log::warn!("Create gist failed: {}", e);
-                    failed_ids.extend(group_snippets.iter().map(|s| s.id.clone()));
+                    return Err(SyncError::Http(format!("Create gist failed: {}", e)));
                 }
             }
+        }
+    };
+
+    // Build files map for the gist
+    let mut files = HashMap::new();
+    for snippet in &snippet_list {
+        let filename = format!("{}.sh", snippet.name);
+        let content = snippet.content.as_deref().unwrap_or("");
+        files.insert(filename, content);
+    }
+
+    // Update gist with all snippets
+    let mut update = GistUpdate::new(Some(target_description));
+    for (filename, content) in &files {
+        update = update.add_file(filename, content);
+    }
+
+    match gitee_client.update_gist(&gist_id, &update) {
+        Ok(_) => {}
+        Err(e) => {
+            log::warn!("Update gist failed: {}", e);
+            failed_ids.extend(snippet_list.iter().map(|s| s.id.clone()));
         }
     }
 

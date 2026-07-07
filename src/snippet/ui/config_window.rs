@@ -107,6 +107,8 @@ impl ConfigWindow {
                     token: dialog.sync_tab.gitee_token_entry.text().to_string(),
                     auto_sync: true,
                     sync_interval: 300,
+                    gist_id: None,
+                    gist_description: dialog.sync_tab.gitee_gist_desc_entry.text().to_string(),
                 },
             });
 

@@ -29,6 +29,14 @@ pub struct GiteeConfig {
     pub auto_sync: bool,
     #[serde(default = "default_sync_interval")]
     pub sync_interval: u64,
+    #[serde(default)]
+    pub gist_id: Option<String>,
+    #[serde(default = "default_gist_description")]
+    pub gist_description: String,
+}
+
+fn default_gist_description() -> String {
+    "CopyTimeTrayConfig".to_string()
 }
 
 fn default_sync_interval() -> u64 {
@@ -42,6 +50,8 @@ impl Default for GiteeConfig {
             token: String::new(),
             auto_sync: true,
             sync_interval: 300,
+            gist_id: None,
+            gist_description: "CopyTimeTrayConfig".to_string(),
         }
     }
 }
