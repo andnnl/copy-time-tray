@@ -134,7 +134,7 @@ impl SnippetStore {
     pub fn load_from_sync(&mut self, remote_snippets: Vec<Snippet>) -> Result<(), StoreError> {
         use std::collections::HashMap;
 
-        let mut by_id: HashMap<String, usize> = self.data.snippets.iter().enumerate()
+        let by_id: HashMap<String, usize> = self.data.snippets.iter().enumerate()
             .map(|(i, s)| (s.id.clone(), i))
             .collect();
 
