@@ -6,6 +6,40 @@ use crate::snippet::config::{
 };
 use super::ConfigTab;
 
+fn show_test_result_dialog(parent: Option<&gtk::Window>, message: &str, is_success: bool) {
+    let title = if is_success { "连接成功" } else { "连接失败" };
+    let dialog = gtk::Dialog::with_buttons(
+        Some(title),
+        parent,
+        gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
+        &[("确定", gtk::ResponseType::Ok)],
+    );
+    dialog.set_default_size(350, -1);
+
+    let content = dialog.content_area();
+    content.set_spacing(8);
+    content.set_margin_top(12);
+    content.set_margin_bottom(12);
+    content.set_margin_start(12);
+    content.set_margin_end(12);
+
+    let icon = if is_success { "✓" } else { "✗" };
+    let icon_label = gtk::Label::new(Some(icon));
+    icon_label.style_context().add_class(if is_success { "success" } else { "error" });
+    icon_label.set_halign(gtk::Align::Center);
+    content.pack_start(&icon_label, false, false, 0);
+
+    let message_label = gtk::Label::new(Some(message));
+    message_label.set_line_wrap(true);
+    message_label.set_max_width_chars(50);
+    message_label.set_halign(gtk::Align::Center);
+    content.pack_start(&message_label, false, false, 0);
+
+    content.show_all();
+    dialog.run();
+    dialog.hide();
+}
+
 fn test_github_connection(token: &str) -> Result<String, String> {
     let client = reqwest::blocking::Client::new();
     let response = client
@@ -86,41 +120,33 @@ impl SyncTab {
         let gh_test_button = gtk::Button::with_label("测试连接");
         let gh_token_for_test = gh_token_entry.clone();
         let gh_test_button_for_signal = gh_test_button.clone();
-        gh_test_button.connect_clicked(move |_| {
+        gh_test_button.connect_clicked(move |button| {
             let token = gh_token_for_test.text().to_string();
             if token.is_empty() {
-                let _ = notify_rust::Notification::new()
-                    .summary("测试连接")
-                    .body("请先填写 Token")
-                    .show();
+                show_test_result_dialog(button.toplevel().and_then(|w| w.downcast::<gtk::Window>().ok()).as_ref(), "请先填写 Token", false);
                 return;
             }
-            gh_test_button_for_signal.set_sensitive(false);
-            gh_test_button_for_signal.set_label("测试中...");
+            button.set_sensitive(false);
+            button.set_label("测试中...");
             let (sender, receiver) = async_channel::bounded(1);
             std::thread::spawn(move || {
                 let result = test_github_connection(&token);
                 let _ = sender.send_blocking(result);
             });
-            let button_weak = gh_test_button_for_signal.downgrade();
+            let button_weak = button.downgrade();
             glib::spawn_future_local(async move {
                 while let Ok(result) = receiver.recv().await {
                     if let Some(button) = button_weak.upgrade() {
                         button.set_sensitive(true);
                         button.set_label("测试连接");
-                    }
-                    match result {
-                        Ok(msg) => {
-                            let _ = notify_rust::Notification::new()
-                                .summary("测试连接成功")
-                                .body(&msg)
-                                .show();
-                        }
-                        Err(e) => {
-                            let _ = notify_rust::Notification::new()
-                                .summary("测试连接失败")
-                                .body(&e)
-                                .show();
+                        let window = button.toplevel().and_then(|w| w.downcast::<gtk::Window>().ok());
+                        match result {
+                            Ok(msg) => {
+                                show_test_result_dialog(window.as_ref(), &msg, true);
+                            }
+                            Err(e) => {
+                                show_test_result_dialog(window.as_ref(), &e, false);
+                            }
                         }
                     }
                 }
@@ -142,42 +168,34 @@ impl SyncTab {
         let gitee_api_for_test = gitee_api_entry.clone();
         let gitee_token_for_test = gitee_token_entry.clone();
         let gitee_test_button_for_signal = gitee_test_button.clone();
-        gitee_test_button.connect_clicked(move |_| {
+        gitee_test_button.connect_clicked(move |button| {
             let api_base = gitee_api_for_test.text().to_string();
             let token = gitee_token_for_test.text().to_string();
             if api_base.is_empty() || token.is_empty() {
-                let _ = notify_rust::Notification::new()
-                    .summary("测试连接")
-                    .body("请先填写 API 地址和 Token")
-                    .show();
+                show_test_result_dialog(button.toplevel().and_then(|w| w.downcast::<gtk::Window>().ok()).as_ref(), "请先填写 API 地址和 Token", false);
                 return;
             }
-            gitee_test_button_for_signal.set_sensitive(false);
-            gitee_test_button_for_signal.set_label("测试中...");
+            button.set_sensitive(false);
+            button.set_label("测试中...");
             let (sender, receiver) = async_channel::bounded(1);
             std::thread::spawn(move || {
                 let result = test_gitee_connection(&api_base, &token);
                 let _ = sender.send_blocking(result);
             });
-            let button_weak = gitee_test_button_for_signal.downgrade();
+            let button_weak = button.downgrade();
             glib::spawn_future_local(async move {
                 while let Ok(result) = receiver.recv().await {
                     if let Some(button) = button_weak.upgrade() {
                         button.set_sensitive(true);
                         button.set_label("测试连接");
-                    }
-                    match result {
-                        Ok(msg) => {
-                            let _ = notify_rust::Notification::new()
-                                .summary("测试连接成功")
-                                .body(&msg)
-                                .show();
-                        }
-                        Err(e) => {
-                            let _ = notify_rust::Notification::new()
-                                .summary("测试连接失败")
-                                .body(&e)
-                                .show();
+                        let window = button.toplevel().and_then(|w| w.downcast::<gtk::Window>().ok());
+                        match result {
+                            Ok(msg) => {
+                                show_test_result_dialog(window.as_ref(), &msg, true);
+                            }
+                            Err(e) => {
+                                show_test_result_dialog(window.as_ref(), &e, false);
+                            }
                         }
                     }
                 }

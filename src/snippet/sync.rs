@@ -191,7 +191,7 @@ pub fn pull(config: &SyncConfig, client: &dyn HttpClient) -> Result<Vec<Snippet>
                 for (filename, file) in gist.files {
                     let name = filename.strip_suffix(".sh").unwrap_or(&filename).to_string();
                     let content = file.content.unwrap_or_default();
-                    let file_id = generate_file_id_from_path(&filename);
+                    let file_id = generate_file_id_from_path(&format!("{}/{}", gist.id, filename));
                     let snippet = Snippet {
                         id: file_id,
                         parent_id: Some(folder_id.clone()),
