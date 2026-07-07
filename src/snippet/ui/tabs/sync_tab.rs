@@ -1,9 +1,52 @@
 use gtk::prelude::*;
+use gtk::glib;
 use crate::snippet::config::{
     Config, SyncProvider, SyncStatus, SyncHistoryEntry,
     SyncResultType,
 };
 use super::ConfigTab;
+
+fn test_github_connection(token: &str) -> Result<String, String> {
+    let client = reqwest::blocking::Client::new();
+    let response = client
+        .get("https://api.github.com/user")
+        .header("Authorization", format!("token {}", token))
+        .header("User-Agent", "copy-time-tray")
+        .send()
+        .map_err(|e| format!("请求失败: {}", e))?;
+
+    if response.status().is_success() {
+        let user: serde_json::Value = response
+            .json()
+            .map_err(|e| format!("解析响应失败: {}", e))?;
+        let login = user["login"].as_str().unwrap_or("未知用户");
+        Ok(format!("连接成功！用户: {}", login))
+    } else {
+        let status = response.status();
+        Err(format!("认证失败，状态码: {}", status))
+    }
+}
+
+fn test_gitee_connection(api_base: &str, token: &str) -> Result<String, String> {
+    let client = reqwest::blocking::Client::new();
+    let url = format!("{}/user?access_token={}", api_base, token);
+    let response = client
+        .get(&url)
+        .header("User-Agent", "copy-time-tray")
+        .send()
+        .map_err(|e| format!("请求失败: {}", e))?;
+
+    if response.status().is_success() {
+        let user: serde_json::Value = response
+            .json()
+            .map_err(|e| format!("解析响应失败: {}", e))?;
+        let login = user["login"].as_str().unwrap_or("未知用户");
+        Ok(format!("连接成功！用户: {}", login))
+    } else {
+        let status = response.status();
+        Err(format!("认证失败，状态码: {}", status))
+    }
+}
 
 pub struct SyncTab {
     pub provider_combo: gtk::ComboBoxText,
@@ -39,6 +82,52 @@ impl SyncTab {
         gh_box.pack_start(&Self::create_row("Branch:", &branch_entry), false, false, 0);
         gh_box.pack_start(&Self::create_row("Token:", &gh_token_entry), false, false, 0);
 
+        // GitHub test connection button
+        let gh_test_button = gtk::Button::with_label("测试连接");
+        let gh_token_for_test = gh_token_entry.clone();
+        let gh_test_button_for_signal = gh_test_button.clone();
+        gh_test_button.connect_clicked(move |_| {
+            let token = gh_token_for_test.text().to_string();
+            if token.is_empty() {
+                let _ = notify_rust::Notification::new()
+                    .summary("测试连接")
+                    .body("请先填写 Token")
+                    .show();
+                return;
+            }
+            gh_test_button_for_signal.set_sensitive(false);
+            gh_test_button_for_signal.set_label("测试中...");
+            let (sender, receiver) = async_channel::bounded(1);
+            std::thread::spawn(move || {
+                let result = test_github_connection(&token);
+                let _ = sender.send_blocking(result);
+            });
+            let button_weak = gh_test_button_for_signal.downgrade();
+            glib::spawn_future_local(async move {
+                while let Ok(result) = receiver.recv().await {
+                    if let Some(button) = button_weak.upgrade() {
+                        button.set_sensitive(true);
+                        button.set_label("测试连接");
+                    }
+                    match result {
+                        Ok(msg) => {
+                            let _ = notify_rust::Notification::new()
+                                .summary("测试连接成功")
+                                .body(&msg)
+                                .show();
+                        }
+                        Err(e) => {
+                            let _ = notify_rust::Notification::new()
+                                .summary("测试连接失败")
+                                .body(&e)
+                                .show();
+                        }
+                    }
+                }
+            });
+        });
+        gh_box.pack_start(&gh_test_button, false, false, 0);
+
         // Gitee fields
         let gitee_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
         let gitee_api_entry = Self::create_entry("Gitee API 地址");
@@ -47,6 +136,54 @@ impl SyncTab {
 
         gitee_box.pack_start(&Self::create_row("API Base:", &gitee_api_entry), false, false, 0);
         gitee_box.pack_start(&Self::create_row("Token:", &gitee_token_entry), false, false, 0);
+
+        // Gitee test connection button
+        let gitee_test_button = gtk::Button::with_label("测试连接");
+        let gitee_api_for_test = gitee_api_entry.clone();
+        let gitee_token_for_test = gitee_token_entry.clone();
+        let gitee_test_button_for_signal = gitee_test_button.clone();
+        gitee_test_button.connect_clicked(move |_| {
+            let api_base = gitee_api_for_test.text().to_string();
+            let token = gitee_token_for_test.text().to_string();
+            if api_base.is_empty() || token.is_empty() {
+                let _ = notify_rust::Notification::new()
+                    .summary("测试连接")
+                    .body("请先填写 API 地址和 Token")
+                    .show();
+                return;
+            }
+            gitee_test_button_for_signal.set_sensitive(false);
+            gitee_test_button_for_signal.set_label("测试中...");
+            let (sender, receiver) = async_channel::bounded(1);
+            std::thread::spawn(move || {
+                let result = test_gitee_connection(&api_base, &token);
+                let _ = sender.send_blocking(result);
+            });
+            let button_weak = gitee_test_button_for_signal.downgrade();
+            glib::spawn_future_local(async move {
+                while let Ok(result) = receiver.recv().await {
+                    if let Some(button) = button_weak.upgrade() {
+                        button.set_sensitive(true);
+                        button.set_label("测试连接");
+                    }
+                    match result {
+                        Ok(msg) => {
+                            let _ = notify_rust::Notification::new()
+                                .summary("测试连接成功")
+                                .body(&msg)
+                                .show();
+                        }
+                        Err(e) => {
+                            let _ = notify_rust::Notification::new()
+                                .summary("测试连接失败")
+                                .body(&e)
+                                .show();
+                        }
+                    }
+                }
+            });
+        });
+        gitee_box.pack_start(&gitee_test_button, false, false, 0);
 
         // Status area
         let status_label = gtk::Label::new(Some("未配置"));

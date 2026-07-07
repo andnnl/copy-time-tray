@@ -775,6 +775,7 @@ name = "copy-time-tray"
 version = "0.3.0"
 dependencies = [
  "arboard",
+ "async-channel",
  "base64",
  "chrono",
  "crossbeam-channel",
