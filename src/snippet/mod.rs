@@ -1,4 +1,5 @@
 pub mod config;
+pub mod gitee;
 pub mod model;
 pub mod store;
 pub mod sync;
