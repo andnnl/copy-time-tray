@@ -16,6 +16,32 @@ pub struct SyncConfig {
     pub repo: String,
     pub branch: String,
     pub token: String,
+    #[serde(default)]
+    pub gitee_config: GiteeConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GiteeConfig {
+    pub api_base: String,
+    pub token: String,
+    pub auto_sync: bool,
+    #[serde(default = "default_sync_interval")]
+    pub sync_interval: u64,
+}
+
+fn default_sync_interval() -> u64 {
+    300
+}
+
+impl Default for GiteeConfig {
+    fn default() -> Self {
+        Self {
+            api_base: "https://gitee.com/api/v5".into(),
+            token: String::new(),
+            auto_sync: true,
+            sync_interval: 300,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +192,7 @@ sync:
                 repo: "repo".into(),
                 branch: "main".into(),
                 token: "token".into(),
+                gitee_config: GiteeConfig::default(),
             }),
         };
         let yaml = serde_yaml::to_string(&config).unwrap();

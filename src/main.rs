@@ -211,6 +211,7 @@ mod platform {
                                     repo: config_result.repo,
                                     branch: config_result.branch,
                                     token: config_result.token,
+                                    gitee_config: crate::snippet::config::GiteeConfig::default(),
                                 }),
                             };
                             if let Err(e) = config.save() {

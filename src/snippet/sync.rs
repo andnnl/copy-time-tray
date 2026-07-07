@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-use crate::snippet::config::{SyncConfig, SyncProvider};
+use crate::snippet::config::{SyncConfig, SyncProvider, GiteeConfig};
 use crate::snippet::model::Snippet;
 
 #[derive(Debug)]
@@ -236,6 +236,7 @@ fn parse_yaml_snippet(relative_path: &str, body: &str) -> Result<Snippet, SyncEr
         synced: true,
         create_date,
         update_date,
+        gitee_gist_id: None,
     })
 }
 
@@ -425,6 +426,7 @@ mod tests {
             repo: "test-repo".into(),
             branch: "main".into(),
             token: "test-token".into(),
+            gitee_config: GiteeConfig::default(),
         }
     }
 
@@ -443,6 +445,7 @@ mod tests {
             repo: "gitee-repo".into(),
             branch: "master".into(),
             token: "token".into(),
+            gitee_config: GiteeConfig::default(),
         };
         let url = base_url(&config);
         assert_eq!(
@@ -467,6 +470,7 @@ mod tests {
             repo: "repo".into(),
             branch: "main".into(),
             token: "gitee-token".into(),
+            gitee_config: GiteeConfig::default(),
         };
         let headers = auth_headers(&config);
         assert_eq!(headers["access_token"], "gitee-token");
