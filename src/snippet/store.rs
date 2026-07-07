@@ -15,6 +15,7 @@ pub enum StoreError {
     Io(std::io::Error),
     Serde(serde_json::Error),
     NotFound(String),
+    Duplicate(String),
 }
 
 impl std::fmt::Display for StoreError {
@@ -23,6 +24,7 @@ impl std::fmt::Display for StoreError {
             StoreError::Io(e) => write!(f, "IO error: {}", e),
             StoreError::Serde(e) => write!(f, "Serialization error: {}", e),
             StoreError::NotFound(id) => write!(f, "Snippet not found: {}", id),
+            StoreError::Duplicate(name) => write!(f, "Duplicate: {}", name),
         }
     }
 }
@@ -77,6 +79,14 @@ impl SnippetStore {
     }
 
     pub fn add(&mut self, snippet: Snippet) -> Result<(), StoreError> {
+        if self.data.snippets.iter().any(|s| {
+            !s.deleted
+                && s.snippet_type == snippet.snippet_type
+                && s.parent_id == snippet.parent_id
+                && s.name == snippet.name
+        }) {
+            return Err(StoreError::Duplicate(snippet.name));
+        }
         self.data.snippets.push(snippet);
         self.save()
     }

@@ -18,6 +18,9 @@ static CMD_TX: OnceLock<crossbeam_channel::Sender<UiCommand>> = OnceLock::new();
 #[cfg(target_os = "linux")]
 static DIALOG_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+#[cfg(target_os = "linux")]
+static DRAG_DATA: Mutex<Option<String>> = Mutex::new(None);
+
 /// 读取当前 snippet 列表并广播给 UI
 fn broadcast_refresh(snippet_type_filter: Option<snippet::model::SnippetType>) -> Vec<snippet::model::Snippet> {
     let manager_guard = match MANAGER.get().and_then(|m| m.lock().ok()) {
@@ -532,7 +535,12 @@ fn handle_ui_response(response: UiResponse) {
                 .show();
         }
         UiResponse::SnippetCreated(snippet) => {
-            let _ = manager.with_store_mut(|store| store.add(snippet.clone()));
+            if let Err(e) = manager.with_store_mut(|store| store.add(snippet.clone())) {
+                let _ = notify_rust::Notification::new()
+                    .summary("创建失败")
+                    .body(&format!("{}", e))
+                    .show();
+            }
             #[cfg(target_os = "windows")]
             send_refresh_to_search();
         }
@@ -567,7 +575,7 @@ fn spawn_response_handler(resp_rx: crossbeam_channel::Receiver<UiResponse>) {
 }
 
 #[cfg(target_os = "linux")]
-fn show_create_snippet_dialog(folders: &[(String, String)]) -> Option<(String, String, Option<String>)> {
+fn show_create_snippet_dialog(folders: &[(String, String)], default_parent_id: Option<&str>) -> Option<(String, String, Option<String>)> {
     use gtk::prelude::*;
     
     let dialog = gtk::Dialog::with_buttons::<gtk::Window>(
@@ -580,6 +588,7 @@ fn show_create_snippet_dialog(folders: &[(String, String)]) -> Option<(String, S
         ],
     );
     dialog.set_default_size(400, 350);
+    dialog.set_position(gtk::WindowPosition::Center);
     
     let content = dialog.content_area();
     content.set_spacing(8);
@@ -593,7 +602,18 @@ fn show_create_snippet_dialog(folders: &[(String, String)]) -> Option<(String, S
     for (_fid, fname) in folders {
         folder_combo.append_text(fname);
     }
-    folder_combo.set_active(Some(0));
+    
+    let active_idx = match default_parent_id {
+        Some(pid) => {
+            if let Some(pos) = folders.iter().position(|(id, _)| id == pid) {
+                (pos + 1) as u32
+            } else {
+                0
+            }
+        }
+        None => 0,
+    };
+    folder_combo.set_active(Some(active_idx));
     let folder_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     folder_row.pack_start(&gtk::Label::new(Some("所属目录：")), false, true, 0);
     folder_row.pack_start(&folder_combo, true, true, 0);
@@ -671,6 +691,7 @@ fn show_edit_snippet_dialog(
         ],
     );
     dialog.set_default_size(400, 350);
+    dialog.set_position(gtk::WindowPosition::Center);
     
     let content = dialog.content_area();
     content.set_spacing(8);
@@ -765,6 +786,7 @@ fn show_delete_snippet_dialog(name: &str) -> bool {
         ],
     );
     dialog.set_default_size(300, 100);
+    dialog.set_position(gtk::WindowPosition::Center);
     
     let content = dialog.content_area();
     content.set_spacing(8);
@@ -787,6 +809,54 @@ fn show_delete_snippet_dialog(name: &str) -> bool {
 }
 
 #[cfg(target_os = "linux")]
+fn show_edit_folder_dialog(existing_name: &str) -> Option<String> {
+    use gtk::prelude::*;
+
+    let dialog = gtk::Dialog::with_buttons::<gtk::Window>(
+        Some("编辑文件夹"),
+        None,
+        gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
+        &[
+            ("取消", gtk::ResponseType::Cancel),
+            ("保存", gtk::ResponseType::Ok),
+        ],
+    );
+    dialog.set_default_size(400, 120);
+    dialog.set_position(gtk::WindowPosition::Center);
+
+    let content = dialog.content_area();
+    content.set_spacing(8);
+    content.set_margin_top(10);
+    content.set_margin_bottom(10);
+    content.set_margin_start(10);
+    content.set_margin_end(10);
+
+    let name_label = gtk::Label::new(Some("名称："));
+    name_label.set_xalign(0.0);
+    let name_entry = gtk::Entry::new();
+    name_entry.set_text(existing_name);
+    name_entry.set_placeholder_text(Some("文件夹名称"));
+    content.pack_start(&name_label, false, true, 0);
+    content.pack_start(&name_entry, false, true, 0);
+
+    content.show_all();
+
+    let response = dialog.run();
+    dialog.close();
+
+    if response == gtk::ResponseType::Ok {
+        let name = name_entry.text().to_string();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name)
+        }
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn launch_snippet_dialog_linux(
     _cmd_tx: crossbeam_channel::Sender<UiCommand>,
 ) {
@@ -800,6 +870,7 @@ fn launch_snippet_dialog_linux(
         &[("关闭", gtk::ResponseType::Close)],
     );
     dialog.set_default_size(800, 550);
+    dialog.set_position(gtk::WindowPosition::Center);
 
     let content = dialog.content_area();
 
@@ -836,10 +907,13 @@ fn launch_snippet_dialog_linux(
         .iter()
         .filter(|s| !s.deleted && s.snippet_type == SnippetType::Folder)
         .collect();
-    let root_snippets: Vec<_> = snippets
+    let all_snippets: Vec<_> = snippets
         .iter()
-        .filter(|s| !s.deleted && s.snippet_type == SnippetType::Snippet && s.parent_id.is_none())
+        .filter(|s| !s.deleted && s.snippet_type == SnippetType::Snippet)
         .collect();
+
+    eprintln!("[DEBUG] folders count: {}", folders.len());
+    eprintln!("[DEBUG] all_snippets count: {}", all_snippets.len());
 
     for folder in &folders {
         let parent_iter = store.insert_with_values(None, None, &[
@@ -849,7 +923,8 @@ fn launch_snippet_dialog_linux(
             (3, &true),
             (4, &"folder-symbolic"),
         ]);
-        for s in &root_snippets {
+        let mut child_count = 0;
+        for s in &all_snippets {
             if s.parent_id.as_deref() == Some(&folder.id) {
                 store.insert_with_values(Some(&parent_iter), None, &[
                     (0, &s.id),
@@ -858,11 +933,13 @@ fn launch_snippet_dialog_linux(
                     (3, &false),
                     (4, &"text-x-script-symbolic"),
                 ]);
+                child_count += 1;
             }
         }
+        eprintln!("[DEBUG] folder '{}' has {} children", folder.name, child_count);
     }
 
-    for s in &root_snippets {
+    for s in &all_snippets {
         if s.parent_id.is_none() || !folders.iter().any(|f| Some(&f.id) == s.parent_id.as_ref()) {
             store.insert_with_values(None, None, &[
                 (0, &s.id),
@@ -873,8 +950,145 @@ fn launch_snippet_dialog_linux(
             ]);
         }
     }
+    eprintln!("[DEBUG] tree store populated, total rows will be shown after expand_all");
 
     let tree_view = gtk::TreeView::with_model(&store);
+
+    let refresh_tree_store = {
+        let store = store.clone();
+        let tree_view = tree_view.clone();
+        move |query: Option<String>, select_id: Option<String>| {
+            store.clear();
+            let snippets = match MANAGER.get().and_then(|m| m.lock().ok()) {
+                Some(guard) => guard.with_store(|s| s.list().to_vec()).unwrap_or_default(),
+                None => Vec::new(),
+            };
+            let all_items: Vec<_> = snippets.iter().filter(|s| !s.deleted).collect();
+            let folders: Vec<_> = all_items
+                .iter()
+                .filter(|s| s.snippet_type == SnippetType::Folder)
+                .cloned()
+                .collect();
+            let all_snippets: Vec<_> = all_items
+                .iter()
+                .filter(|s| s.snippet_type == SnippetType::Snippet)
+                .cloned()
+                .collect();
+
+            let q = query
+                .and_then(|q| if q.is_empty() { None } else { Some(q.to_lowercase()) });
+
+            let matching_snippet_ids: std::collections::HashSet<String> = if let Some(ref query_lower) = q {
+                all_snippets
+                    .iter()
+                    .filter(|s| {
+                        s.name.to_lowercase().contains(query_lower)
+                            || s.content
+                                .as_ref()
+                                .map(|c| c.to_lowercase().contains(query_lower))
+                                .unwrap_or(false)
+                    })
+                    .map(|s| s.id.clone())
+                    .collect()
+            } else {
+                std::collections::HashSet::new()
+            };
+
+            let folders_to_show: std::collections::HashSet<String> = if let Some(ref query_lower) = q {
+                let mut set = std::collections::HashSet::new();
+                for folder in &folders {
+                    if folder.name.to_lowercase().contains(query_lower) {
+                        set.insert(folder.id.clone());
+                    }
+                    if all_snippets.iter().any(|s| {
+                        s.parent_id.as_deref() == Some(&folder.id)
+                            && matching_snippet_ids.contains(&s.id)
+                    }) {
+                        set.insert(folder.id.clone());
+                    }
+                }
+                set
+            } else {
+                folders.iter().map(|f| f.id.clone()).collect()
+            };
+
+            for folder in &folders {
+                if !folders_to_show.contains(&folder.id) {
+                    continue;
+                }
+                let parent_iter = store.insert_with_values(None, None, &[
+                    (0, &folder.id),
+                    (1, &folder.name),
+                    (2, &""),
+                    (3, &true),
+                    (4, &"folder-symbolic"),
+                ]);
+                for s in &all_snippets {
+                    if s.parent_id.as_deref() == Some(&folder.id) {
+                        let should_show = if q.is_some() {
+                            matching_snippet_ids.contains(&s.id)
+                        } else {
+                            true
+                        };
+                        if should_show {
+                            store.insert_with_values(Some(&parent_iter), None, &[
+                                (0, &s.id),
+                                (1, &s.name),
+                                (2, &s.content.clone().unwrap_or_default()),
+                                (3, &false),
+                                (4, &"text-x-script-symbolic"),
+                            ]);
+                        }
+                    }
+                }
+            }
+
+            for s in &all_snippets {
+                if s.parent_id.is_none() {
+                    let should_show = if q.is_some() {
+                        matching_snippet_ids.contains(&s.id)
+                    } else {
+                        true
+                    };
+                    if should_show {
+                        store.insert_with_values(None, None, &[
+                            (0, &s.id),
+                            (1, &s.name),
+                            (2, &s.content.clone().unwrap_or_default()),
+                            (3, &false),
+                            (4, &"text-x-script-symbolic"),
+                        ]);
+                    }
+                }
+            }
+
+            tree_view.expand_all();
+
+            if let Some(id) = select_id {
+                if let Some(model) = tree_view.model() {
+                    if let Some(ts) = model.downcast_ref::<gtk::TreeStore>() {
+                        ts.foreach(|model, _path, iter| {
+                            let row_id: String =
+                                model.value(iter, 0).get::<String>().unwrap_or_default();
+                            if row_id == id {
+                                tree_view.selection().select_iter(iter);
+                                return false;
+                            }
+                            true
+                        });
+                    }
+                }
+            }
+        }
+    };
+
+    let tree_view_ref = tree_view.clone();
+    let search_entry = entry.clone();
+    let refresh_for_search = refresh_tree_store.clone();
+    search_entry.connect_changed(move |entry| {
+        let query = entry.text().to_string();
+        refresh_for_search(if query.is_empty() { None } else { Some(query) }, None);
+    });
     tree_view.set_headers_visible(false);
     let column = gtk::TreeViewColumn::new();
     let icon_renderer = gtk::CellRendererPixbuf::new();
@@ -911,7 +1125,7 @@ fn launch_snippet_dialog_linux(
 
     let new_button = gtk::Button::with_label("新增 Snippet");
     new_button.style_context().add_class("suggested-action");
-    let new_folder_button = gtk::Button::with_label("新增上级目录");
+    let new_folder_button = gtk::Button::with_label("新增目录");
     let edit_button = gtk::Button::with_label("编辑");
     let delete_button = gtk::Button::with_label("删除");
     delete_button.style_context().add_class("destructive-action");
@@ -932,44 +1146,83 @@ fn launch_snippet_dialog_linux(
 
     content.show_all();
 
-    let target_entry = gtk::TargetEntry::new("SNIPPET_ID", gtk::TargetFlags::empty(), 0);
+    tree_view.expand_all();
+    tree_view.set_enable_tree_lines(true);
+    tree_view.set_show_expanders(true);
+
+    let target_entry = gtk::TargetEntry::new("UTF8_STRING", gtk::TargetFlags::empty(), 0);
     let drop_tree_view = tree_view.clone();
+    tree_view.add_events(
+        gtk::gdk::EventMask::BUTTON_PRESS_MASK
+        | gtk::gdk::EventMask::BUTTON_RELEASE_MASK
+        | gtk::gdk::EventMask::BUTTON_MOTION_MASK
+        | gtk::gdk::EventMask::POINTER_MOTION_MASK
+    );
     tree_view.drag_source_set(
         gtk::gdk::ModifierType::BUTTON1_MASK,
         &[target_entry.clone()],
         gtk::gdk::DragAction::MOVE,
     );
+    tree_view.drag_source_set_icon_name("text-x-script-symbolic");
+    tree_view.connect_drag_begin(move |_, drag_context| {
+        eprintln!("[DEBUG] drag_begin called, context: {:?}", drag_context);
+    });
     tree_view.connect_drag_data_get(move |_, _, data, info, _| {
+        eprintln!("[DEBUG] drag_data_get called: info={}", info);
         if info == 0 {
             let tv = drop_tree_view.clone();
             if let Some(sel) = tv.selection().selected() {
                 let (model, iter) = sel;
                 if let Some(ts) = model.downcast_ref::<gtk::TreeStore>() {
                     let is_folder: bool = ts.value(&iter, 3).get::<bool>().unwrap_or_default();
+                    eprintln!("[DEBUG] drag_data_get: is_folder={}", is_folder);
                     if is_folder { return; }
                     let id: String = ts.value(&iter, 0).get::<String>().unwrap_or_default();
-                    data.set_text(&id);
+                    eprintln!("[DEBUG] drag_data_get: storing id '{}' in DRAG_DATA", id);
+                    if let Ok(mut drag_data) = DRAG_DATA.lock() {
+                        *drag_data = Some(id);
+                    }
                 }
             }
         }
     });
     let dest_tree_view = tree_view.clone();
+    let refresh_for_drag = refresh_tree_store.clone();
     tree_view.drag_dest_set(
-        gtk::DestDefaults::ALL,
+        gtk::DestDefaults::empty(),
         &[target_entry],
         gtk::gdk::DragAction::MOVE,
     );
-    tree_view.connect_drag_data_received(move |_tv, _dc, x, y, data, info, _| {
-        if info != 0 { return; }
-        let dragged_id = match data.text() {
-            Some(t) => t.to_string(),
-            None => return,
+    tree_view.connect_drag_drop(move |tv, dc, _x, _y, time| {
+        eprintln!("[DEBUG] drag_drop called");
+        let target = tv.drag_dest_find_target(dc, None);
+        eprintln!("[DEBUG] drag_drop: found target = {:?}", target.is_some());
+        if let Some(target) = target {
+            tv.drag_get_data(dc, &target, time);
+            true
+        } else {
+            false
+        }
+    });
+    tree_view.connect_drag_motion(move |_tv, dc, _x, _y, time| {
+        dc.drag_status(gtk::gdk::DragAction::MOVE, time);
+        true
+    });
+    tree_view.connect_drag_data_received(move |tv, _dc, x, y, _data, _info, _| {
+        eprintln!("[DEBUG] drag_data_received: x={}, y={}", x, y);
+        let dragged_id = match DRAG_DATA.lock().ok().and_then(|mut data| data.take()) {
+            Some(id) => id,
+            None => {
+                eprintln!("[DEBUG] drag_data_received: DRAG_DATA is empty");
+                return;
+            }
         };
-        let tree_x = x as i32;
-        let tree_y = y as i32;
-        let path_opt = dest_tree_view.path_at_pos(tree_x, tree_y);
-        match path_opt {
-            Some((Some(path), _, _, _)) => {
+        eprintln!("[DEBUG] dragged_id={}", dragged_id);
+        let drop_opt = dest_tree_view.dest_row_at_pos(x, y);
+        eprintln!("[DEBUG] drop_opt present = {}", drop_opt.is_some());
+        match drop_opt {
+            Some((Some(ref path), gtk::TreeViewDropPosition::IntoOrBefore)) 
+            | Some((Some(ref path), gtk::TreeViewDropPosition::IntoOrAfter)) => {
                 let model = dest_tree_view.model().unwrap();
                 let ts = match model.downcast_ref::<gtk::TreeStore>() {
                     Some(m) => m,
@@ -979,6 +1232,7 @@ fn launch_snippet_dialog_linux(
                     let target_is_folder: bool = ts.value(&iter, 3).get::<bool>().unwrap_or_default();
                     if !target_is_folder { return; }
                     let target_id: String = ts.value(&iter, 0).get::<String>().unwrap_or_default();
+                    eprintln!("[DEBUG] moving {} into folder {}", dragged_id, target_id);
                     if let Some(manager) = MANAGER.get().and_then(|m| m.lock().ok()) {
                         let _ = manager.with_store_mut(|s| {
                             let _ = s.update(&dragged_id, |snip| {
@@ -986,9 +1240,11 @@ fn launch_snippet_dialog_linux(
                             });
                         });
                     }
+                    refresh_for_drag(None, Some(dragged_id.clone()));
                 }
             }
             _ => {
+                eprintln!("[DEBUG] moving {} to root", dragged_id);
                 if let Some(manager) = MANAGER.get().and_then(|m| m.lock().ok()) {
                     let _ = manager.with_store_mut(|s| {
                         let _ = s.update(&dragged_id, |snip| {
@@ -996,6 +1252,7 @@ fn launch_snippet_dialog_linux(
                         });
                     });
                 }
+                refresh_for_drag(None, Some(dragged_id.clone()));
             }
         }
     });
@@ -1013,11 +1270,14 @@ fn launch_snippet_dialog_linux(
         std::sync::Arc::new(std::sync::Mutex::new(None));
     let selected_name: std::sync::Arc<std::sync::Mutex<Option<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
+    let selected_parent_id: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
 
     let sc_clone = selected_content.clone();
     let si_clone = selected_id.clone();
     let sf_clone = selected_is_folder.clone();
     let sn_clone = selected_name.clone();
+    let sp_clone = selected_parent_id.clone();
     selection.connect_changed(move |sel| {
         if let Some((model, iter)) = sel.selected() {
             if let Some(tree_store) = model.downcast_ref::<gtk::TreeStore>() {
@@ -1025,16 +1285,51 @@ fn launch_snippet_dialog_linux(
                 let name: String = tree_store.value(&iter, 1).get::<String>().unwrap_or_default();
                 let content: String = tree_store.value(&iter, 2).get::<String>().unwrap_or_default();
                 let is_folder: bool = tree_store.value(&iter, 3).get::<bool>().unwrap_or_default();
+                let parent_id: Option<String> = tree_store.value(&iter, 0).get::<String>().ok();
                 *sc_clone.lock().unwrap() = Some(content.clone());
                 *si_clone.lock().unwrap() = Some(id);
                 *sf_clone.lock().unwrap() = Some(is_folder);
                 *sn_clone.lock().unwrap() = Some(name);
+                *sp_clone.lock().unwrap() = parent_id;
                 if is_folder {
                     if let Some(buffer) = preview_text_ref.buffer() { buffer.set_text("(文件夹)"); }
                     copy_button_ref.set_sensitive(false);
                 } else {
                     if let Some(buffer) = preview_text_ref.buffer() { buffer.set_text(&content); }
                     copy_button_ref.set_sensitive(true);
+                }
+            }
+        }
+    });
+
+    let dialog_for_dblclick = dialog.clone();
+    tree_view.connect_row_activated(move |tv, path, _col| {
+        if let Some(model) = tv.model() {
+            if let Some(ts) = model.downcast_ref::<gtk::TreeStore>() {
+                if let Some(iter) = ts.iter(path) {
+                    let is_folder: bool = ts.value(&iter, 3).get::<bool>().unwrap_or_default();
+                    if is_folder {
+                        if tv.row_expanded(path) {
+                            tv.collapse_row(path);
+                        } else {
+                            tv.expand_row(path, false);
+                        }
+                    } else {
+                        let content: String = ts.value(&iter, 2).get::<String>().unwrap_or_default();
+                        let name: String = ts.value(&iter, 1).get::<String>().unwrap_or_default();
+                        if !content.is_empty() {
+                            let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
+                            clipboard.set_text(&content);
+                            clipboard.store();
+                            let _ = notify_rust::Notification::new()
+                                .summary("Snippet Copied")
+                                .body(&format!("已复制: {}", name.chars().take(30).collect::<String>()))
+                                .show();
+                            if let Some(d) = dialog_for_dblclick.downcast_ref::<gtk::Dialog>() {
+                                d.response(gtk::ResponseType::Close);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1058,7 +1353,13 @@ fn launch_snippet_dialog_linux(
 
     let dialog_for_new_folder = dialog.clone();
     new_folder_button.connect_clicked(move |_| {
-        if let Some(d) = dialog_for_new_folder.downcast_ref::<gtk::Dialog>() { d.response(gtk::ResponseType::Accept); }
+        eprintln!("[DEBUG] new_folder_button clicked");
+        if let Some(d) = dialog_for_new_folder.downcast_ref::<gtk::Dialog>() {
+            eprintln!("[DEBUG] sending Accept response for new folder");
+            d.response(gtk::ResponseType::Accept);
+        } else {
+            eprintln!("[DEBUG] failed to downcast dialog for new folder");
+        }
     });
 
     let dialog_for_new_snippet = dialog.clone();
@@ -1071,47 +1372,70 @@ fn launch_snippet_dialog_linux(
     let sf_for_edit = selected_is_folder.clone();
     let sn_for_edit = selected_name.clone();
     let sc_for_edit = selected_content.clone();
+    let refresh_for_edit = refresh_tree_store.clone();
     edit_button.connect_clicked(move |_| {
         let is_folder = sf_for_edit.lock().unwrap().unwrap_or(false);
         let id_opt = si_for_edit.lock().unwrap().clone();
+        let name_opt = sn_for_edit.lock().unwrap().clone();
         if let Some(_id) = id_opt {
+            let name = name_opt.unwrap_or_default();
             if is_folder {
-                return;
-            }
-            let name = sn_for_edit.lock().unwrap().clone().unwrap_or_default();
-            let content = sc_for_edit.lock().unwrap().clone().unwrap_or_default();
-            let folders_data: Vec<(String, String)> = if let Some(mg) = MANAGER.get().and_then(|m| m.lock().ok()) {
-                mg.with_store(|s| {
-                    s.list().iter()
-                        .filter(|sn| !sn.deleted && sn.snippet_type == SnippetType::Folder)
-                        .map(|sn| (sn.id.clone(), sn.name.clone()))
-                        .collect()
-                }).unwrap_or_default()
+                eprintln!("[DEBUG] editing folder: {}", _id);
+                if let Some(new_name) = show_edit_folder_dialog(&name) {
+                    {
+                        if let Some(manager_guard) = MANAGER.get().and_then(|m| m.lock().ok()) {
+                            let manager = &*manager_guard;
+                            let _ = manager.with_store_mut(|store| {
+                                store.update(&_id, |s| {
+                                    s.name = new_name.clone();
+                                })
+                            });
+                        }
+                    }
+                    let _ = notify_rust::Notification::new()
+                        .summary("文件夹已更新")
+                        .body(&format!("'{}' 已重命名", new_name))
+                        .show();
+                    refresh_for_edit(None, Some(_id.clone()));
+                }
             } else {
-                Vec::new()
-            };
-            let parent_id_opt: Option<String> = if let Some(mg) = MANAGER.get().and_then(|m| m.lock().ok()) {
-                mg.with_store(|s| {
-                    s.get(&_id).map(|sn| sn.parent_id.clone()).flatten()
-                }).ok().flatten()
-            } else {
-                None
-            };
-            if let Some(d) = dialog_for_edit.downcast_ref::<gtk::Dialog>() { d.response(gtk::ResponseType::Close); }
-            if let Some((new_name, new_content, new_parent_id)) = show_edit_snippet_dialog(&name, &content, &folders_data, parent_id_opt.as_deref()) {
-                if let Some(manager_guard) = MANAGER.get().and_then(|m| m.lock().ok()) {
-                    let manager = &*manager_guard;
-                    let _ = manager.with_store_mut(|store| {
-                        store.update(&_id, |s| {
-                            s.name = new_name.clone();
-                            s.content = Some(new_content.clone());
-                            s.parent_id = new_parent_id.clone();
-                        })
-                    });
+                eprintln!("[DEBUG] editing snippet: {}", _id);
+                let content = sc_for_edit.lock().unwrap().clone().unwrap_or_default();
+                let folders_data: Vec<(String, String)> = if let Some(mg) = MANAGER.get().and_then(|m| m.lock().ok()) {
+                    mg.with_store(|s| {
+                        s.list().iter()
+                            .filter(|sn| !sn.deleted && sn.snippet_type == SnippetType::Folder)
+                            .map(|sn| (sn.id.clone(), sn.name.clone()))
+                            .collect()
+                    }).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                let parent_id_opt: Option<String> = if let Some(mg) = MANAGER.get().and_then(|m| m.lock().ok()) {
+                    mg.with_store(|s| {
+                        s.get(&_id).map(|sn| sn.parent_id.clone()).flatten()
+                    }).ok().flatten()
+                } else {
+                    None
+                };
+                if let Some((new_name, new_content, new_parent_id)) = show_edit_snippet_dialog(&name, &content, &folders_data, parent_id_opt.as_deref()) {
+                    {
+                        if let Some(manager_guard) = MANAGER.get().and_then(|m| m.lock().ok()) {
+                            let manager = &*manager_guard;
+                            let _ = manager.with_store_mut(|store| {
+                                store.update(&_id, |s| {
+                                    s.name = new_name.clone();
+                                    s.content = Some(new_content.clone());
+                                    s.parent_id = new_parent_id.clone();
+                                })
+                            });
+                        }
+                    }
                     let _ = notify_rust::Notification::new()
                         .summary("Snippet 已更新")
                         .body(&format!("'{}' 已保存", new_name))
                         .show();
+                    refresh_for_edit(None, Some(_id.clone()));
                 }
             }
         }
@@ -1121,80 +1445,119 @@ fn launch_snippet_dialog_linux(
     let si_for_del = selected_id.clone();
     let sn_for_del = selected_name.clone();
     let sf_for_del = selected_is_folder.clone();
+    let refresh_for_del = refresh_tree_store.clone();
     delete_button.connect_clicked(move |_| {
         let is_folder = sf_for_del.lock().unwrap().unwrap_or(false);
         let id_opt = si_for_del.lock().unwrap().clone();
         let name_opt = sn_for_del.lock().unwrap().clone();
         if let (Some(id), Some(name)) = (id_opt, name_opt) {
             if show_delete_snippet_dialog(&name) {
-                if let Some(d) = dialog_for_del.downcast_ref::<gtk::Dialog>() { d.response(gtk::ResponseType::Close); }
-                if let Some(manager_guard) = MANAGER.get().and_then(|m| m.lock().ok()) {
-                    let manager = &*manager_guard;
-                    let _ = manager.with_store_mut(|store| store.delete(&id));
-                    let _ = notify_rust::Notification::new()
-                        .summary("Snippet 已删除")
-                        .body(&format!("'{}' 已删除", name))
-                        .show();
+                {
+                    if let Some(manager_guard) = MANAGER.get().and_then(|m| m.lock().ok()) {
+                        let manager = &*manager_guard;
+                        let _ = manager.with_store_mut(|store| store.delete(&id));
+                    }
                 }
+                let _ = notify_rust::Notification::new()
+                    .summary("Snippet 已删除")
+                    .body(&format!("'{}' 已删除", name))
+                    .show();
+                refresh_for_del(None, None);
             }
         }
     });
 
-    let response = dialog.run();
-    dialog.hide();
-
-    if response == gtk::ResponseType::Accept {
-        let name_input = gtk::Dialog::with_buttons::<gtk::Window>(
-            Some("新增上级目录"),
-            None,
-            gtk::DialogFlags::MODAL,
-            &[("取消", gtk::ResponseType::Cancel), ("创建", gtk::ResponseType::Ok)],
-        );
-        let entry = gtk::Entry::new();
-        entry.set_placeholder_text(Some("目录名称"));
-        let ca = name_input.content_area();
-        ca.set_margin_start(10);
-        ca.set_margin_end(10);
-        ca.add(&entry);
-        ca.show_all();
-        if name_input.run() == gtk::ResponseType::Ok {
-            let folder_name = entry.text().to_string();
-            if !folder_name.is_empty() {
-                if let Some(mg) = MANAGER.get().and_then(|m| m.lock().ok()) {
-                    let manager = &*mg;
-                    let folder = crate::snippet::model::Snippet::new_folder(folder_name.clone(), None);
-                    let _ = manager.with_store_mut(|store| store.add(folder));
-                    let _ = notify_rust::Notification::new()
-                        .summary("目录已创建")
-                        .body(&format!("'{}' 已保存", folder_name))
-                        .show();
+    dialog.show_all();
+    let refresh = refresh_tree_store.clone();
+    let dialog_for_response = dialog.clone();
+    let selected_parent_id_for_create = selected_parent_id.clone();
+    dialog.connect_response(move |_, response| {
+        match response {
+            gtk::ResponseType::Accept => {
+                eprintln!("[DEBUG] Accept response");
+                let name_input = gtk::Dialog::with_buttons::<gtk::Window>(
+                    Some("新增目录"),
+                    Some(dialog_for_response.upcast_ref::<gtk::Window>()),
+                    gtk::DialogFlags::MODAL,
+                    &[("取消", gtk::ResponseType::Cancel), ("创建", gtk::ResponseType::Ok)],
+                );
+                let entry = gtk::Entry::new();
+                entry.set_placeholder_text(Some("目录名称"));
+                let ca = name_input.content_area();
+                ca.set_margin_start(10);
+                ca.set_margin_end(10);
+                ca.add(&entry);
+                ca.show_all();
+                let folder_response = name_input.run();
+                eprintln!("[DEBUG] new folder dialog response: {:?}", folder_response);
+                if folder_response == gtk::ResponseType::Ok {
+                    let folder_name = entry.text().to_string();
+                    eprintln!("[DEBUG] creating folder: '{}'", folder_name);
+                    if !folder_name.is_empty() {
+                        if let Some(mg) = MANAGER.get().and_then(|m| m.lock().ok()) {
+                            let manager = &*mg;
+                            let folder = crate::snippet::model::Snippet::new_folder(folder_name.clone(), None);
+                            if let Err(e) = manager.with_store_mut(|store| store.add(folder)) {
+                                let _ = notify_rust::Notification::new()
+                                    .summary("创建失败")
+                                    .body(&format!("{}", e))
+                                    .show();
+                            } else {
+                                let _ = notify_rust::Notification::new()
+                                    .summary("目录已创建")
+                                    .body(&format!("'{}' 已保存", folder_name))
+                                    .show();
+                            }
+                        }
+                    }
                 }
+                name_input.close();
+                refresh(None, None);
+            }
+            gtk::ResponseType::Apply => {
+                eprintln!("[DEBUG] Apply response");
+                let folder_data: Vec<(String, String)> = {
+                    if let Some(mg) = MANAGER.get().and_then(|m| m.lock().ok()) {
+                        mg.with_store(|s| {
+                            s.list().iter()
+                                .filter(|sn| !sn.deleted && sn.snippet_type == SnippetType::Folder)
+                                .map(|sn| (sn.id.clone(), sn.name.clone()))
+                                .collect()
+                        }).unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    }
+                };
+                if let Some((name, text_content, parent_id)) = show_create_snippet_dialog(&folder_data, selected_parent_id_for_create.lock().unwrap().as_deref()) {
+                    if let Some(mg) = MANAGER.get().and_then(|m| m.lock().ok()) {
+                        let manager = &*mg;
+                        let snippet = crate::snippet::model::Snippet::new_snippet(name.clone(), text_content, parent_id);
+                        if let Err(e) = manager.with_store_mut(|store| store.add(snippet)) {
+                            let _ = notify_rust::Notification::new()
+                                .summary("创建失败")
+                                .body(&format!("{}", e))
+                                .show();
+                        } else {
+                            let _ = notify_rust::Notification::new()
+                                .summary("Snippet 已创建")
+                                .body(&format!("'{}' 已保存", name))
+                                .show();
+                        }
+                    }
+                }
+                refresh(None, None);
+            }
+            gtk::ResponseType::Close => {
+                eprintln!("[DEBUG] Close response");
+                dialog_for_response.hide();
+                gtk::main_quit();
+            }
+            _ => {
+                eprintln!("[DEBUG] Unhandled response: {:?}", response);
             }
         }
-        name_input.close();
-    } else if response == gtk::ResponseType::Apply {
-        let folder_data: Vec<(String, String)> = folders
-            .iter()
-            .map(|f| (f.id.clone(), f.name.clone()))
-            .collect();
-        if let Some((name, text_content, parent_id)) = show_create_snippet_dialog(&folder_data) {
-            if let Some(mg) = MANAGER.get().and_then(|m| m.lock().ok()) {
-                let manager = &*mg;
-                let snippet = crate::snippet::model::Snippet::new_snippet(name.clone(), text_content, parent_id);
-                if let Err(e) = manager.with_store_mut(|store| store.add(snippet)) {
-                    let _ = notify_rust::Notification::new()
-                        .summary("创建失败")
-                        .body(&format!("{}", e))
-                        .show();
-                } else {
-                    let _ = notify_rust::Notification::new()
-                        .summary("Snippet 已创建")
-                        .body(&format!("'{}' 已保存", name))
-                        .show();
-                }
-            }
-        }
-    }
+    });
+    gtk::main();
 }
 
 #[allow(unused_variables)]
