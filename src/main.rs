@@ -307,13 +307,13 @@ mod platform {
 
         menu.append(&PredefinedMenuItem::separator()).unwrap();
 
-        let sync_id = muda::MenuId::new("sync_snippets");
-        let sync_item = MenuItem::with_id(sync_id.clone(), "同步 Snippet", true, None);
+        let config_id = muda::MenuId::new("open_config");
+        let config_item = MenuItem::with_id(config_id.clone(), "配置", true, None);
         let snippet_id = muda::MenuId::new("search_snippets");
         let snippet_item = MenuItem::with_id(snippet_id.clone(), "代码片断", true, None);
         let quit_id = muda::MenuId::new("quit");
         let quit_item = MenuItem::with_id(quit_id.clone(), "退出", true, None);
-        menu.append_items(&[&sync_item, &snippet_item, &PredefinedMenuItem::separator(), &quit_item]).unwrap();
+        menu.append_items(&[&config_item, &snippet_item, &PredefinedMenuItem::separator(), &quit_item]).unwrap();
 
         let rgba = create_icon_rgba();
         let icon = image::RgbaImage::from_raw(32, 32, rgba).expect("Failed to create icon");
@@ -346,33 +346,12 @@ mod platform {
                             let time_text = get_time_text("full");
                             copy_to_clipboard(&generate_md5(&time_text, 32));
                         }
-                        "sync_snippets" => {
-                            if let Some(manager_guard) = MANAGER.get().and_then(|m| m.lock().ok()) {
-                                let manager = &*manager_guard;
-                                if !manager.is_configured() {
-                                    let _ = notify_rust::Notification::new()
-                                        .summary("未配置同步")
-                                        .body("请在 ~/.config/copy-time-tray/config.yaml 中配置同步信息")
-                                        .show();
-                                    continue;
-                                }
-                                
-                let sync_result = manager.do_pull_with_retry().and_then(|_| manager.do_push());
-                                match sync_result {
-                                    Ok(_) => {
-                                        let _ = notify_rust::Notification::new()
-                                            .summary("同步成功")
-                                            .body("Snippets 已同步到云端")
-                                            .show();
-                                    }
-                                    Err(e) => {
-                                        let _ = notify_rust::Notification::new()
-                                            .summary("同步失败")
-                                            .body(&format!("{}", e))
-                                            .show();
-                                    }
-                                }
-                            }
+                        "open_config" => {
+                            // Windows 暂不支持 ConfigWindow，显示提示
+                            let _ = notify_rust::Notification::new()
+                                .summary("配置")
+                                .body("请在 ~/.config/copy-time-tray/config.yaml 中手动配置")
+                                .show();
                         }
                         "search_snippets" => {
                             send_refresh_to_search();
