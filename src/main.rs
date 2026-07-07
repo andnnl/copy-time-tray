@@ -211,6 +211,7 @@ mod platform {
                                     repo: config_result.repo,
                                     branch: config_result.branch,
                                     token: config_result.token,
+                                    gitee_config: config_result.gitee_config,
                                 }),
                             };
                             if let Err(e) = config.save() {
@@ -238,7 +239,7 @@ mod platform {
                     glib::ControlFlow::Break
                 });
 
-                let sync_result = manager.do_pull().and_then(|_| manager.do_push());
+                                let sync_result = manager.do_pull_with_retry().and_then(|_| manager.do_push());
                 let sync_result = std::sync::Arc::new(std::sync::Mutex::new(sync_result));
 
                 glib::idle_add(move || {
@@ -410,7 +411,7 @@ mod platform {
                                     continue;
                                 }
                                 
-                                let sync_result = manager.do_pull().and_then(|_| manager.do_push());
+                let sync_result = manager.do_pull_with_retry().and_then(|_| manager.do_push());
                                 match sync_result {
                                     Ok(_) => {
                                         let _ = notify_rust::Notification::new()
@@ -540,23 +541,31 @@ fn handle_ui_response(response: UiResponse) {
                     .summary("创建失败")
                     .body(&format!("{}", e))
                     .show();
+            } else {
+                manager.schedule_push();
             }
             #[cfg(target_os = "windows")]
             send_refresh_to_search();
         }
         UiResponse::SnippetUpdated(snippet) => {
             let id = snippet.id.clone();
-            let _ = manager.with_store_mut(|store| {
+            let update_result = manager.with_store_mut(|store| {
                 store.update(&id, |s| {
                     s.name = snippet.name.clone();
                     s.content = snippet.content.clone();
                 })
             });
+            if update_result.is_ok() {
+                manager.schedule_push();
+            }
             #[cfg(target_os = "windows")]
             send_refresh_to_search();
         }
         UiResponse::SnippetDeleted(id) => {
-            let _ = manager.with_store_mut(|store| store.delete(&id));
+            let del_result = manager.with_store_mut(|store| store.delete(&id));
+            if del_result.is_ok() {
+                manager.schedule_push();
+            }
             #[cfg(target_os = "windows")]
             send_refresh_to_search();
         }
@@ -572,6 +581,112 @@ fn spawn_response_handler(resp_rx: crossbeam_channel::Receiver<UiResponse>) {
             handle_ui_response(response);
         }
     });
+}
+
+#[cfg(target_os = "linux")]
+fn populate_snippet_tree(
+    store: &gtk::TreeStore,
+    all_folders: &[&snippet::model::Snippet],
+    all_snippets: &[&snippet::model::Snippet],
+    query: &Option<String>,
+    matching_ids: &std::collections::HashSet<String>,
+    folders_to_show: &std::collections::HashSet<String>,
+) {
+    use std::collections::HashMap;
+    use gtk::prelude::TreeStoreExtManual;
+
+    let mut folders_by_parent: HashMap<Option<String>, Vec<usize>> = HashMap::new();
+    for (i, folder) in all_folders.iter().enumerate() {
+        folders_by_parent.entry(folder.parent_id.clone()).or_default().push(i);
+    }
+
+    let mut snippets_by_parent: HashMap<Option<String>, Vec<usize>> = HashMap::new();
+    for (i, s) in all_snippets.iter().enumerate() {
+        snippets_by_parent.entry(s.parent_id.clone()).or_default().push(i);
+    }
+
+    fn build_children(
+        store: &gtk::TreeStore,
+        all_folders: &[&snippet::model::Snippet],
+        all_snippets: &[&snippet::model::Snippet],
+        folders_by_parent: &HashMap<Option<String>, Vec<usize>>,
+        snippets_by_parent: &HashMap<Option<String>, Vec<usize>>,
+        parent_key: &Option<String>,
+        parent_iter: Option<&gtk::TreeIter>,
+        query: &Option<String>,
+        matching_ids: &std::collections::HashSet<String>,
+        folders_to_show: &std::collections::HashSet<String>,
+    ) {
+        if let Some(indices) = folders_by_parent.get(parent_key) {
+            for &idx in indices {
+                let folder = &all_folders[idx];
+                if !folders_to_show.contains(&folder.id) {
+                    continue;
+                }
+                let folder_iter = store.insert_with_values(parent_iter, None, &[
+                    (0, &folder.id),
+                    (1, &folder.name),
+                    (2, &""),
+                    (3, &true),
+                    (4, &"folder-symbolic"),
+                ]);
+                build_children(
+                    store, all_folders, all_snippets,
+                    folders_by_parent, snippets_by_parent,
+                    &Some(folder.id.clone()), Some(&folder_iter),
+                    query, matching_ids, folders_to_show,
+                );
+                if let Some(snip_indices) = snippets_by_parent.get(&Some(folder.id.clone())) {
+                    for &si in snip_indices {
+                        let s = &all_snippets[si];
+                        let should_show = if query.is_some() {
+                            matching_ids.contains(&s.id)
+                        } else {
+                            true
+                        };
+                        if should_show {
+                            store.insert_with_values(Some(&folder_iter), None, &[
+                                (0, &s.id),
+                                (1, &s.name),
+                                (2, &s.content.clone().unwrap_or_default()),
+                                (3, &false),
+                                (4, &"text-x-script-symbolic"),
+                            ]);
+                        }
+                    }
+                }
+            }
+        }
+
+        if parent_key.is_none() {
+            if let Some(snip_indices) = snippets_by_parent.get(&None) {
+                for &si in snip_indices {
+                    let s = &all_snippets[si];
+                    let should_show = if query.is_some() {
+                        matching_ids.contains(&s.id)
+                    } else {
+                        true
+                    };
+                    if should_show {
+                        store.insert_with_values(None, None, &[
+                            (0, &s.id),
+                            (1, &s.name),
+                            (2, &s.content.clone().unwrap_or_default()),
+                            (3, &false),
+                            (4, &"text-x-script-symbolic"),
+                        ]);
+                    }
+                }
+            }
+        }
+    }
+
+    build_children(
+        store, all_folders, all_snippets,
+        &folders_by_parent, &snippets_by_parent,
+        &None, None,
+        query, matching_ids, folders_to_show,
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -915,41 +1030,16 @@ fn launch_snippet_dialog_linux(
     eprintln!("[DEBUG] folders count: {}", folders.len());
     eprintln!("[DEBUG] all_snippets count: {}", all_snippets.len());
 
-    for folder in &folders {
-        let parent_iter = store.insert_with_values(None, None, &[
-            (0, &folder.id),
-            (1, &folder.name),
-            (2, &""),
-            (3, &true),
-            (4, &"folder-symbolic"),
-        ]);
-        let mut child_count = 0;
-        for s in &all_snippets {
-            if s.parent_id.as_deref() == Some(&folder.id) {
-                store.insert_with_values(Some(&parent_iter), None, &[
-                    (0, &s.id),
-                    (1, &s.name),
-                    (2, &s.content.clone().unwrap_or_default()),
-                    (3, &false),
-                    (4, &"text-x-script-symbolic"),
-                ]);
-                child_count += 1;
-            }
-        }
-        eprintln!("[DEBUG] folder '{}' has {} children", folder.name, child_count);
-    }
-
-    for s in &all_snippets {
-        if s.parent_id.is_none() || !folders.iter().any(|f| Some(&f.id) == s.parent_id.as_ref()) {
-            store.insert_with_values(None, None, &[
-                (0, &s.id),
-                (1, &s.name),
-                (2, &s.content.clone().unwrap_or_default()),
-                (3, &false),
-                (4, &"text-x-script-symbolic"),
-            ]);
-        }
-    }
+    let empty_set = std::collections::HashSet::new();
+    let all_folder_ids: std::collections::HashSet<String> = folders.iter().map(|f| f.id.clone()).collect();
+    populate_snippet_tree(
+        &store,
+        &folders,
+        &all_snippets,
+        &None,
+        &empty_set,
+        &all_folder_ids,
+    );
     eprintln!("[DEBUG] tree store populated, total rows will be shown after expand_all");
 
     let tree_view = gtk::TreeView::with_model(&store);
@@ -996,14 +1086,22 @@ fn launch_snippet_dialog_linux(
 
             let folders_to_show: std::collections::HashSet<String> = if let Some(ref query_lower) = q {
                 let mut set = std::collections::HashSet::new();
+                let folder_map: std::collections::HashMap<String, &snippet::model::Snippet> =
+                    folders.iter().map(|f| (f.id.clone(), *f)).collect();
+                for s in &all_snippets {
+                    if matching_snippet_ids.contains(&s.id) {
+                        let mut current_parent = s.parent_id.clone();
+                        while let Some(pid) = current_parent {
+                            if set.contains(&pid) {
+                                break;
+                            }
+                            set.insert(pid.clone());
+                            current_parent = folder_map.get(&pid).and_then(|f| f.parent_id.clone());
+                        }
+                    }
+                }
                 for folder in &folders {
                     if folder.name.to_lowercase().contains(query_lower) {
-                        set.insert(folder.id.clone());
-                    }
-                    if all_snippets.iter().any(|s| {
-                        s.parent_id.as_deref() == Some(&folder.id)
-                            && matching_snippet_ids.contains(&s.id)
-                    }) {
                         set.insert(folder.id.clone());
                     }
                 }
@@ -1012,55 +1110,20 @@ fn launch_snippet_dialog_linux(
                 folders.iter().map(|f| f.id.clone()).collect()
             };
 
-            for folder in &folders {
-                if !folders_to_show.contains(&folder.id) {
-                    continue;
-                }
-                let parent_iter = store.insert_with_values(None, None, &[
-                    (0, &folder.id),
-                    (1, &folder.name),
-                    (2, &""),
-                    (3, &true),
-                    (4, &"folder-symbolic"),
-                ]);
-                for s in &all_snippets {
-                    if s.parent_id.as_deref() == Some(&folder.id) {
-                        let should_show = if q.is_some() {
-                            matching_snippet_ids.contains(&s.id)
-                        } else {
-                            true
-                        };
-                        if should_show {
-                            store.insert_with_values(Some(&parent_iter), None, &[
-                                (0, &s.id),
-                                (1, &s.name),
-                                (2, &s.content.clone().unwrap_or_default()),
-                                (3, &false),
-                                (4, &"text-x-script-symbolic"),
-                            ]);
-                        }
-                    }
-                }
-            }
+            let all_folder_ids: std::collections::HashSet<String> = if q.is_some() {
+                folders_to_show.clone()
+            } else {
+                folders.iter().map(|f| f.id.clone()).collect()
+            };
 
-            for s in &all_snippets {
-                if s.parent_id.is_none() {
-                    let should_show = if q.is_some() {
-                        matching_snippet_ids.contains(&s.id)
-                    } else {
-                        true
-                    };
-                    if should_show {
-                        store.insert_with_values(None, None, &[
-                            (0, &s.id),
-                            (1, &s.name),
-                            (2, &s.content.clone().unwrap_or_default()),
-                            (3, &false),
-                            (4, &"text-x-script-symbolic"),
-                        ]);
-                    }
-                }
-            }
+            populate_snippet_tree(
+                &store,
+                &folders,
+                &all_snippets,
+                &q,
+                &matching_snippet_ids,
+                &all_folder_ids,
+            );
 
             tree_view.expand_all();
 

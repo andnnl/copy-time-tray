@@ -22,6 +22,8 @@ pub struct Snippet {
     pub synced: bool,
     pub create_date: DateTime<Utc>,
     pub update_date: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gitee_gist_id: Option<String>,
 }
 
 impl Snippet {
@@ -38,6 +40,7 @@ impl Snippet {
             synced: false,
             create_date: now,
             update_date: now,
+            gitee_gist_id: None,
         }
     }
 
@@ -54,6 +57,7 @@ impl Snippet {
             synced: false,
             create_date: now,
             update_date: now,
+            gitee_gist_id: None,
         }
     }
 

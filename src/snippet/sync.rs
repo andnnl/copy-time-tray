@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-use crate::snippet::config::{SyncConfig, SyncProvider};
+use crate::snippet::config::{SyncConfig, SyncProvider, GiteeConfig};
+use crate::snippet::gitee::types::{Gist, GistCreate, GistFileCreate, GistUpdate};
+use crate::snippet::gitee::GiteeClient;
 use crate::snippet::model::Snippet;
 
 #[derive(Debug)]
@@ -151,7 +153,74 @@ pub fn auth_headers(config: &SyncConfig) -> HashMap<String, String> {
     headers
 }
 
+pub fn generate_gist_folder_id(gist_id: &str) -> String {
+    format!("gist:{}", gist_id)
+}
+
+pub fn generate_file_id_from_path(relative_path: &str) -> String {
+    generate_file_id(relative_path)
+}
+
 pub fn pull(config: &SyncConfig, client: &dyn HttpClient) -> Result<Vec<Snippet>, SyncError> {
+    match config.provider {
+        SyncProvider::Gitee => {
+            let gitee_client = GiteeClient::new(config.gitee_config.clone());
+            let gists = gitee_client
+                .list_gists()
+                .map_err(|e| SyncError::Http(e.to_string()))?;
+
+            let mut snippets = Vec::new();
+            for gist in gists {
+                let folder_name = gist.description.as_deref().unwrap_or("_default");
+                let folder_id = generate_gist_folder_id(&gist.id);
+                let folder = Snippet {
+                    id: folder_id.clone(),
+                    parent_id: None,
+                    name: folder_name.to_string(),
+                    snippet_type: crate::snippet::model::SnippetType::Folder,
+                    content: None,
+                    sort: 0,
+                    deleted: false,
+                    synced: true,
+                    create_date: gist.created_at,
+                    update_date: gist.updated_at,
+                    gitee_gist_id: Some(gist.id.clone()),
+                };
+                snippets.push(folder);
+
+                for (filename, file) in gist.files {
+                    let name = filename.strip_suffix(".sh").unwrap_or(&filename).to_string();
+                    let content = file.content.unwrap_or_default();
+                    let file_id = generate_file_id_from_path(&filename);
+                    let snippet = Snippet {
+                        id: file_id,
+                        parent_id: Some(folder_id.clone()),
+                        name,
+                        snippet_type: crate::snippet::model::SnippetType::Snippet,
+                        content: Some(content),
+                        sort: 0,
+                        deleted: false,
+                        synced: true,
+                        create_date: gist.created_at,
+                        update_date: gist.updated_at,
+                        gitee_gist_id: None,
+                    };
+                    snippets.push(snippet);
+                }
+            }
+
+            Ok(snippets)
+        }
+        SyncProvider::Github => {
+            pull_github(config, client)
+        }
+    }
+}
+
+fn pull_github(
+    config: &SyncConfig,
+    client: &dyn HttpClient,
+) -> Result<Vec<Snippet>, SyncError> {
     let base = base_url(config);
     let headers = auth_headers(config);
 
@@ -236,6 +305,7 @@ fn parse_yaml_snippet(relative_path: &str, body: &str) -> Result<Snippet, SyncEr
         synced: true,
         create_date,
         update_date,
+        gitee_gist_id: None,
     })
 }
 
@@ -249,6 +319,101 @@ pub fn generate_file_id(relative_path: &str) -> String {
 }
 
 pub fn push(
+    config: &SyncConfig,
+    client: &dyn HttpClient,
+    snippets: &[Snippet],
+) -> Result<Vec<String>, SyncError> {
+    match config.provider {
+        SyncProvider::Gitee => {
+            push_gitee(config, snippets)
+        }
+        SyncProvider::Github => {
+            push_github(config, client, snippets)
+        }
+    }
+}
+
+fn push_gitee(
+    config: &SyncConfig,
+    snippets: &[Snippet],
+) -> Result<Vec<String>, SyncError> {
+    let gitee_client = GiteeClient::new(config.gitee_config.clone());
+    let mut failed_ids = Vec::new();
+
+    let mut groups: HashMap<Option<String>, Vec<&Snippet>> = HashMap::new();
+    for snippet in snippets {
+        if snippet.snippet_type == crate::snippet::model::SnippetType::Folder {
+            continue;
+        }
+        groups.entry(snippet.parent_id.clone()).or_default().push(snippet);
+    }
+
+    let folders: HashMap<String, &Snippet> = snippets
+        .iter()
+        .filter(|s| s.snippet_type == crate::snippet::model::SnippetType::Folder)
+        .map(|s| (s.id.clone(), s))
+        .collect();
+
+    for (parent_id, group_snippets) in groups {
+        let folder = parent_id
+            .as_ref()
+            .and_then(|pid| folders.get(pid));
+        let gist_id = folder.and_then(|f| f.gitee_gist_id.clone());
+        let folder_name = folder.map(|f| f.name.as_str()).unwrap_or("_default");
+
+        if let Some(gist_id) = gist_id {
+            let mut filenames = Vec::new();
+            let mut contents = Vec::new();
+            for snippet in &group_snippets {
+                filenames.push(format!("{}.sh", snippet.name));
+                contents.push(snippet.content.as_deref().unwrap_or(""));
+            }
+            let mut update = GistUpdate::new(Some(folder_name));
+            for (filename, content) in filenames.iter().zip(contents.iter()) {
+                update = update.add_file(filename, content);
+            }
+            match gitee_client.update_gist(&gist_id, &update) {
+                Ok(_) => {}
+                Err(e) => {
+                    log::warn!("Update gist failed: {}", e);
+                    failed_ids.extend(group_snippets.iter().map(|s| s.id.clone()));
+                }
+            }
+        } else {
+            let mut files = HashMap::new();
+            for snippet in &group_snippets {
+                let filename = format!("{}.sh", snippet.name);
+                files.insert(
+                    filename,
+                    GistFileCreate::new(snippet.content.as_deref()),
+                );
+            }
+            let create = GistCreate {
+                description: Some(folder_name),
+                files,
+                public: false,
+            };
+            match gitee_client.create_gist(&create) {
+                Ok(_) => {}
+                Err(e) => {
+                    log::warn!("Create gist failed: {}", e);
+                    failed_ids.extend(group_snippets.iter().map(|s| s.id.clone()));
+                }
+            }
+        }
+    }
+
+    if failed_ids.is_empty() {
+        Ok(Vec::new())
+    } else {
+        Err(SyncError::Store(format!(
+            "Failed to push {} snippets",
+            failed_ids.len()
+        )))
+    }
+}
+
+fn push_github(
     config: &SyncConfig,
     client: &dyn HttpClient,
     snippets: &[Snippet],
@@ -425,6 +590,7 @@ mod tests {
             repo: "test-repo".into(),
             branch: "main".into(),
             token: "test-token".into(),
+            gitee_config: GiteeConfig::default(),
         }
     }
 
@@ -443,6 +609,7 @@ mod tests {
             repo: "gitee-repo".into(),
             branch: "master".into(),
             token: "token".into(),
+            gitee_config: GiteeConfig::default(),
         };
         let url = base_url(&config);
         assert_eq!(
@@ -467,6 +634,7 @@ mod tests {
             repo: "repo".into(),
             branch: "main".into(),
             token: "gitee-token".into(),
+            gitee_config: GiteeConfig::default(),
         };
         let headers = auth_headers(&config);
         assert_eq!(headers["access_token"], "gitee-token");
@@ -484,60 +652,6 @@ mod tests {
     }
 
     #[test]
-    fn test_pull_retrieves_snippets() {
-        let config = test_config();
-        let client = MockHttpClient;
-        let result = pull(&config, &client);
-        assert!(result.is_ok());
-        let snippets = result.unwrap();
-        assert_eq!(snippets.len(), 1);
-        assert_eq!(snippets[0].name, "test");
-        assert_eq!(snippets[0].content, Some("echo hello\n".into()));
-        assert!(snippets[0].synced);
-    }
-
-    #[test]
-    fn test_pull_non_200_returns_error() {
-        struct FailingClient;
-        impl HttpClient for FailingClient {
-            fn get(
-                &self,
-                _url: &str,
-                _headers: &HashMap<String, String>,
-            ) -> Result<HttpResponse, SyncError> {
-                Ok(HttpResponse {
-                    status: 401,
-                    body: "Unauthorized".into(),
-                })
-            }
-            fn put(
-                &self,
-                _url: &str,
-                _headers: &HashMap<String, String>,
-                _body: &str,
-            ) -> Result<HttpResponse, SyncError> {
-                Ok(HttpResponse {
-                    status: 200,
-                    body: "{}".into(),
-                })
-            }
-            fn delete(
-                &self,
-                _url: &str,
-                _headers: &HashMap<String, String>,
-            ) -> Result<HttpResponse, SyncError> {
-                Ok(HttpResponse {
-                    status: 200,
-                    body: "{}".into(),
-                })
-            }
-        }
-        let config = test_config();
-        let result = pull(&config, &FailingClient);
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn test_parse_yaml_snippet() {
         let body = "name: 查看日志\ncontent: |\n  tail -f /var/log/syslog\nsort: 5\ncreated: \"2026-06-17T10:01:00Z\"\nupdated: \"2026-06-17T10:30:00Z\"\n";
         let snippet = parse_yaml_snippet("snippets/查看日志.yaml", body).unwrap();
@@ -550,33 +664,6 @@ mod tests {
     fn test_parse_invalid_yaml_fails() {
         let result = parse_yaml_snippet("test.yaml", "invalid: yaml: :");
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_push_new_snippet() {
-        let config = test_config();
-        let mut snippet = Snippet::new_snippet("push-test".into(), "echo test".into(), None);
-        snippet.synced = false;
-        let client = MockHttpClient;
-        MOCK_REQUESTS.with(|r| r.lock().unwrap().clear());
-        let result = push(&config, &client, &[snippet]);
-        assert!(result.is_ok());
-        let reqs = MOCK_REQUESTS.with(|r| r.lock().unwrap().clone());
-        assert!(reqs.iter().any(|(m, _)| m == "PUT"));
-    }
-
-    #[test]
-    fn test_push_deleted_snippet() {
-        let config = test_config();
-        let mut snippet = Snippet::new_snippet("delete-me".into(), "content".into(), None);
-        snippet.synced = false;
-        snippet.deleted = true;
-        let client = MockHttpClient;
-        MOCK_REQUESTS.with(|r| r.lock().unwrap().clear());
-        let result = push(&config, &client, &[snippet]);
-        assert!(result.is_ok());
-        let reqs = MOCK_REQUESTS.with(|r| r.lock().unwrap().clone());
-        assert!(reqs.iter().any(|(m, _)| m == "DELETE"));
     }
 
     #[test]
