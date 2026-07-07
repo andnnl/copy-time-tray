@@ -360,7 +360,10 @@ fn push_gitee(
         .filter(|s| s.snippet_type == crate::snippet::model::SnippetType::Snippet)
         .collect();
 
+    eprintln!("[DEBUG] push_gitee: {} snippets to push", snippet_list.len());
+
     if snippet_list.is_empty() {
+        eprintln!("[DEBUG] push_gitee: No snippets to push");
         return Ok(Vec::new());
     }
 
@@ -369,14 +372,25 @@ fn push_gitee(
         .list_gists()
         .map_err(|e| SyncError::Http(e.to_string()))?;
 
+    eprintln!("[DEBUG] push_gitee: Found {} gists", gists.len());
+    for gist in &gists {
+        eprintln!("[DEBUG] push_gitee: Gist - id: {}, description: {:?}", gist.id, gist.description);
+    }
+
     let target_description = &config.gitee_config.gist_description;
+    eprintln!("[DEBUG] push_gitee: Looking for gist with description: {}", target_description);
+    
     let existing_gist = gists.iter().find(|g| {
         g.description.as_deref() == Some(target_description)
     });
 
     let gist_id = match existing_gist {
-        Some(gist) => gist.id.clone(),
+        Some(gist) => {
+            eprintln!("[DEBUG] push_gitee: Found existing gist: {}", gist.id);
+            gist.id.clone()
+        }
         None => {
+            eprintln!("[DEBUG] push_gitee: Creating new gist with description: {}", target_description);
             // Create new gist
             let create = GistCreate {
                 description: Some(target_description),
@@ -384,8 +398,12 @@ fn push_gitee(
                 public: false,
             };
             match gitee_client.create_gist(&create) {
-                Ok(gist) => gist.id,
+                Ok(gist) => {
+                    eprintln!("[DEBUG] push_gitee: Created gist with id: {}", gist.id);
+                    gist.id
+                }
                 Err(e) => {
+                    eprintln!("[DEBUG] push_gitee: Create gist failed: {}", e);
                     log::warn!("Create gist failed: {}", e);
                     return Err(SyncError::Http(format!("Create gist failed: {}", e)));
                 }
@@ -401,6 +419,8 @@ fn push_gitee(
         files.insert(filename, content);
     }
 
+    eprintln!("[DEBUG] push_gitee: Updating gist {} with {} files", gist_id, files.len());
+
     // Update gist with all snippets
     let mut update = GistUpdate::new(Some(target_description));
     for (filename, content) in &files {
@@ -408,16 +428,21 @@ fn push_gitee(
     }
 
     match gitee_client.update_gist(&gist_id, &update) {
-        Ok(_) => {}
+        Ok(_) => {
+            eprintln!("[DEBUG] push_gitee: Update gist succeeded");
+        }
         Err(e) => {
+            eprintln!("[DEBUG] push_gitee: Update gist failed: {}", e);
             log::warn!("Update gist failed: {}", e);
             failed_ids.extend(snippet_list.iter().map(|s| s.id.clone()));
         }
     }
 
     if failed_ids.is_empty() {
+        eprintln!("[DEBUG] push_gitee: All snippets pushed successfully");
         Ok(Vec::new())
     } else {
+        eprintln!("[DEBUG] push_gitee: Failed to push {} snippets", failed_ids.len());
         Err(SyncError::Store(format!(
             "Failed to push {} snippets",
             failed_ids.len()

@@ -36,34 +36,53 @@ impl GiteeClient {
     }
 
     pub fn list_gists(&self) -> Result<Vec<Gist>> {
-        let resp = self
-            .with_auth(self.client.get(self.url_gists()))
-            .header("Accept", "application/json")
-            .send()
-            .map_err(|e| error::GiteeError::Http(e.to_string()))?;
+        let mut all_gists = Vec::new();
+        let mut page = 1;
+        let per_page = 100;
 
-        let status = resp.status();
-        if status == 401 || status == 403 {
-            return Err(error::GiteeError::Auth(status.as_u16()));
-        }
-        if status == 429 {
-            let retry_after = resp
-                .headers()
-                .get("X-RateLimit-Reset")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(60);
-            return Err(error::GiteeError::RateLimited(retry_after));
-        }
-        if !status.is_success() {
-            return Err(error::GiteeError::Http(format!(
-                "list_gists failed: {}",
-                status
-            )));
+        loop {
+            let url = format!("{}?page={}&per_page={}", self.url_gists(), page, per_page);
+            let resp = self
+                .with_auth(self.client.get(&url))
+                .header("Accept", "application/json")
+                .send()
+                .map_err(|e| error::GiteeError::Http(e.to_string()))?;
+
+            let status = resp.status();
+            if status == 401 || status == 403 {
+                return Err(error::GiteeError::Auth(status.as_u16()));
+            }
+            if status == 429 {
+                let retry_after = resp
+                    .headers()
+                    .get("X-RateLimit-Reset")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(60);
+                return Err(error::GiteeError::RateLimited(retry_after));
+            }
+            if !status.is_success() {
+                return Err(error::GiteeError::Http(format!(
+                    "list_gists failed: {}",
+                    status
+                )));
+            }
+
+            let gists: Vec<Gist> = resp
+                .json()
+                .map_err(|e| error::GiteeError::Parse(e.to_string()))?;
+
+            let count = gists.len();
+            all_gists.extend(gists);
+
+            // If we got fewer results than per_page, we've reached the end
+            if count < per_page {
+                break;
+            }
+            page += 1;
         }
 
-        resp.json::<Vec<Gist>>()
-            .map_err(|e| error::GiteeError::Parse(e.to_string()))
+        Ok(all_gists)
     }
 
     pub fn create_gist(&self, gist: &GistCreate) -> Result<Gist> {
