@@ -203,7 +203,9 @@ mod platform {
 
                 if !manager.is_configured() {
                     glib::idle_add(move || {
+                        eprintln!("[DEBUG] Opening config dialog...");
                         if let Some(config_result) = config_dialog::show_config_dialog(None) {
+                            eprintln!("[DEBUG] Config dialog returned: {:?}", config_result.provider);
                             let config = crate::snippet::config::Config {
                                 sync: Some(crate::snippet::config::SyncConfig {
                                     provider: config_result.provider,
@@ -213,33 +215,47 @@ mod platform {
                                     token: config_result.token,
                                     gitee_config: config_result.gitee_config,
                                 }),
+                                general: crate::snippet::config::GeneralConfig::default(),
+                                sync_status: crate::snippet::config::SyncStatus::default(),
                             };
+                            eprintln!("[DEBUG] Saving config...");
                             if let Err(e) = config.save() {
+                                eprintln!("[DEBUG] Save failed: {}", e);
                                 let _ = notify_rust::Notification::new()
                                     .summary("配置保存失败")
                                     .body(&format!("{}", e))
                                     .show();
                             } else {
+                                eprintln!("[DEBUG] Save succeeded");
+                                if let Some(mut m) = MANAGER.get().and_then(|m| m.lock().ok()) {
+                                    let _ = m.reload_config();
+                                }
                                 let _ = notify_rust::Notification::new()
                                     .summary("配置已保存")
                                     .body("现在可以再次点击同步")
                                     .show();
                             }
+                        } else {
+                            eprintln!("[DEBUG] Config dialog returned None (cancelled)");
                         }
                         glib::ControlFlow::Break
                     });
                     return;
                 }
 
+                let sync_status = manager.with_store(|store| {
+                    store.pending_sync().len()
+                }).unwrap_or(0);
+
                 glib::idle_add(move || {
                     let _ = notify_rust::Notification::new()
                         .summary("Snippet Sync")
-                        .body("同步中...")
+                        .body(&format!("同步中... ({} 个待同步)", sync_status))
                         .show();
                     glib::ControlFlow::Break
                 });
 
-                                let sync_result = manager.do_pull_with_retry().and_then(|_| manager.do_push());
+                let sync_result = manager.do_pull_with_retry().and_then(|_| manager.do_push());
                 let sync_result = std::sync::Arc::new(std::sync::Mutex::new(sync_result));
 
                 glib::idle_add(move || {

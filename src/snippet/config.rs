@@ -1,4 +1,6 @@
+use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::fs;
 use std::path::PathBuf;
 
@@ -45,8 +47,100 @@ impl Default for GiteeConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeneralConfig {
+    #[serde(default = "default_true")]
+    pub auto_sync: bool,
+    #[serde(default = "default_sync_interval")]
+    pub sync_interval: u64,
+    #[serde(default = "default_true")]
+    pub notify_on_success: bool,
+    #[serde(default = "default_true")]
+    pub notify_on_failure: bool,
+    #[serde(default = "default_true")]
+    pub notify_on_create: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for GeneralConfig {
+    fn default() -> Self {
+        Self {
+            auto_sync: true,
+            sync_interval: 300,
+            notify_on_success: true,
+            notify_on_failure: true,
+            notify_on_create: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum SyncDirection {
+    Push,
+    Pull,
+}
+
+impl fmt::Display for SyncDirection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SyncDirection::Push => write!(f, "Push"),
+            SyncDirection::Pull => write!(f, "Pull"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum SyncResultType {
+    Success,
+    Failed,
+}
+
+impl fmt::Display for SyncResultType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SyncResultType::Success => write!(f, "成功"),
+            SyncResultType::Failed => write!(f, "失败"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncHistoryEntry {
+    pub timestamp: DateTime<Local>,
+    pub direction: SyncDirection,
+    pub result: SyncResultType,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncStatus {
+    pub last_sync_time: Option<DateTime<Local>>,
+    pub pending_count: usize,
+    pub last_sync_result: Option<SyncResultType>,
+    #[serde(default)]
+    pub history: Vec<SyncHistoryEntry>,
+}
+
+impl Default for SyncStatus {
+    fn default() -> Self {
+        Self {
+            last_sync_time: None,
+            pending_count: 0,
+            last_sync_result: None,
+            history: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub sync: Option<SyncConfig>,
+    #[serde(default)]
+    pub general: GeneralConfig,
+    #[serde(default)]
+    pub sync_status: SyncStatus,
 }
 
 #[derive(Debug)]
@@ -100,7 +194,11 @@ impl Config {
             let config: Config = serde_yaml::from_str(&content)?;
             Ok(config)
         } else {
-            Ok(Config { sync: None })
+            Ok(Config {
+                sync: None,
+                general: GeneralConfig::default(),
+                sync_status: SyncStatus::default(),
+            })
         }
     }
 
@@ -124,6 +222,57 @@ impl Config {
 
     pub fn is_configured(&self) -> bool {
         self.sync.is_some()
+    }
+
+    pub fn sync_status_path() -> Result<PathBuf, ConfigError> {
+        Ok(Self::config_dir()?.join("sync_status.json"))
+    }
+
+    pub fn load_sync_status() -> Result<SyncStatus, ConfigError> {
+        let path = Self::sync_status_path()?;
+        if path.exists() {
+            let content = fs::read_to_string(&path)?;
+            let status: SyncStatus = serde_json::from_str(&content)
+                .map_err(|e| ConfigError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    e.to_string(),
+                )))?;
+            Ok(status)
+        } else {
+            Ok(SyncStatus::default())
+        }
+    }
+
+    pub fn save_sync_status(status: &SyncStatus) -> Result<(), ConfigError> {
+        let dir = Self::config_dir()?;
+        fs::create_dir_all(&dir)?;
+        let content = serde_json::to_string_pretty(status)
+            .map_err(|e| ConfigError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                e.to_string(),
+            )))?;
+        let path = Self::sync_status_path()?;
+        fs::write(&path, content)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&path)?.permissions();
+            perms.set_mode(0o600);
+            fs::set_permissions(&path, perms)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn add_sync_history(&mut self, entry: SyncHistoryEntry) {
+        self.sync_status.history.push(entry);
+        // 只保留最近 20 条
+        if self.sync_status.history.len() > 20 {
+            self.sync_status.history = self.sync_status.history.split_off(
+                self.sync_status.history.len() - 20
+            );
+        }
     }
 }
 
@@ -194,6 +343,8 @@ sync:
                 token: "token".into(),
                 gitee_config: GiteeConfig::default(),
             }),
+            general: GeneralConfig::default(),
+            sync_status: SyncStatus::default(),
         };
         let yaml = serde_yaml::to_string(&config).unwrap();
         assert!(yaml.contains("provider: github"));
@@ -223,5 +374,40 @@ sync:
 "#;
         let result: Result<Config, _> = serde_yaml::from_str(yaml);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_general_config_defaults() {
+        let config = GeneralConfig::default();
+        assert!(config.auto_sync);
+        assert_eq!(config.sync_interval, 300);
+        assert!(config.notify_on_success);
+        assert!(config.notify_on_failure);
+        assert!(config.notify_on_create);
+    }
+
+    #[test]
+    fn test_sync_status_defaults() {
+        let status = SyncStatus::default();
+        assert!(status.last_sync_time.is_none());
+        assert_eq!(status.pending_count, 0);
+        assert!(status.history.is_empty());
+    }
+
+    #[test]
+    fn test_parse_config_with_general() {
+        let yaml = r#"
+sync: null
+general:
+  auto_sync: false
+  sync_interval: 600
+  notify_on_success: false
+  notify_on_failure: true
+  notify_on_create: true
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(!config.general.auto_sync);
+        assert_eq!(config.general.sync_interval, 600);
+        assert!(!config.general.notify_on_success);
     }
 }
