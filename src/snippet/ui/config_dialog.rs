@@ -163,43 +163,43 @@ pub fn show_config_dialog(parent: Option<&gtk::Window>) -> Option<ConfigDialogRe
     let gitee_token_for_test = gitee_fields.token_entry.clone();
     let provider_for_test = provider_combo.clone();
     let parent_window: Option<gtk::Window> = parent.cloned();
-    dialog.connect_local("response", false, move |values| {
-        let id = values[1].get::<i32>().unwrap_or(0);
-        let resp = ResponseType::from(id);
+    dialog.connect_response(move |_, resp| {
         if resp == ResponseType::Apply {
             let is_gitee = provider_for_test.active_text().as_deref() == Some("gitee");
             let pw = parent_window.as_ref().map(|w| w as &gtk::Window);
             if !is_gitee {
                 show_error_dialog(pw, "测试连接仅支持 Gitee");
-                return None;
+                return;
             }
             let api_base = gitee_api_for_test.text().to_string();
             let token = gitee_token_for_test.text().to_string();
             if api_base.is_empty() || token.is_empty() {
                 show_error_dialog(pw, "请填写 API 地址和令牌");
-                return None;
+                return;
             }
             let config = GiteeConfig {
                 api_base,
                 token,
                 ..GiteeConfig::default()
             };
-            let rp = parent_window.as_ref().map(|w| w as &gtk::Window);
-            match std::thread::spawn(move || {
+            std::thread::spawn(move || {
                 let client = crate::snippet::gitee::GiteeClient::new(config);
                 match client.list_gists() {
-                    Ok(gists) => Ok(gists.len()),
-                    Err(e) => Err(e.to_string()),
+                    Ok(gists) => {
+                        let _ = notify_rust::Notification::new()
+                            .summary("连接成功")
+                            .body(&format!("连接 Gitee 成功，共 {} 个片段", gists.len()))
+                            .show();
+                    }
+                    Err(e) => {
+                        let _ = notify_rust::Notification::new()
+                            .summary("连接失败")
+                            .body(&e.to_string())
+                            .show();
+                    }
                 }
-            })
-            .join()
-            {
-                Ok(Ok(count)) => show_info_dialog(rp, "连接成功", &format!("连接 Gitee 成功，共 {} 个片段", count)),
-                Ok(Err(e)) => show_error_dialog(rp, &format!("连接失败: {}", e)),
-                Err(_) => show_error_dialog(rp, "测试连接超时"),
-            }
+            });
         }
-        None
     });
 
     content.show_all();

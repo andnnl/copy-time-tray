@@ -247,6 +247,11 @@ impl SnippetManager {
         let mut store = self.store.lock().map_err(|e| e.to_string())?;
         Ok(f(&mut store))
     }
+
+    pub fn reload_config(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.config = Config::load()?;
+        Ok(())
+    }
 }
 
 impl Default for SnippetManager {

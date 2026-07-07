@@ -1,5 +1,3 @@
-use gtk::prelude::*;
-
 pub mod sync_tab;
 pub mod general_tab;
 pub mod about_tab;

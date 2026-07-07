@@ -23,10 +23,6 @@ impl GiteeClient {
         &self.config.api_base
     }
 
-    fn auth_header(&self) -> (String, String) {
-        ("access_token".into(), self.config.token.clone())
-    }
-
     fn url_gists(&self) -> String {
         format!("{}/gists", self.api_base())
     }
@@ -35,12 +31,13 @@ impl GiteeClient {
         format!("{}/gists/{}", self.api_base(), id)
     }
 
+    fn with_auth(&self, req: reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestBuilder {
+        req.query(&[("access_token", self.config.token.as_str())])
+    }
+
     pub fn list_gists(&self) -> Result<Vec<Gist>> {
-        let (k, v) = self.auth_header();
         let resp = self
-            .client
-            .get(self.url_gists())
-            .header(&k, &v)
+            .with_auth(self.client.get(self.url_gists()))
             .header("Accept", "application/json")
             .send()
             .map_err(|e| error::GiteeError::Http(e.to_string()))?;
@@ -70,11 +67,8 @@ impl GiteeClient {
     }
 
     pub fn create_gist(&self, gist: &GistCreate) -> Result<Gist> {
-        let (k, v) = self.auth_header();
         let resp = self
-            .client
-            .post(self.url_gists())
-            .header(&k, &v)
+            .with_auth(self.client.post(self.url_gists()))
             .header("Accept", "application/json")
             .json(gist)
             .send()
@@ -86,11 +80,8 @@ impl GiteeClient {
     }
 
     pub fn update_gist(&self, id: &str, gist: &GistUpdate) -> Result<Gist> {
-        let (k, v) = self.auth_header();
         let resp = self
-            .client
-            .patch(self.url_gist(id))
-            .header(&k, &v)
+            .with_auth(self.client.patch(self.url_gist(id)))
             .header("Accept", "application/json")
             .json(gist)
             .send()
@@ -102,11 +93,8 @@ impl GiteeClient {
     }
 
     pub fn delete_gist(&self, id: &str) -> Result<()> {
-        let (k, v) = self.auth_header();
         let resp = self
-            .client
-            .delete(self.url_gist(id))
-            .header(&k, &v)
+            .with_auth(self.client.delete(self.url_gist(id)))
             .send()
             .map_err(|e| error::GiteeError::Http(e.to_string()))?;
 

@@ -43,7 +43,7 @@ impl ConfigTab for AboutTab {
 
         let github_link = gtk::LinkButton::with_label(
             "https://github.com/your-username/copy-time-tray",
-            Some("GitHub")
+            "GitHub"
         );
         links_box.pack_start(&github_link, false, false, 0);
 

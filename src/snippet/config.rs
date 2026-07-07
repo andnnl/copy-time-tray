@@ -143,6 +143,16 @@ pub struct Config {
     pub sync_status: SyncStatus,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            sync: None,
+            general: GeneralConfig::default(),
+            sync_status: SyncStatus::default(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ConfigError {
     Io(std::io::Error),

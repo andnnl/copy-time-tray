@@ -1,5 +1,5 @@
 use gtk::prelude::*;
-use crate::snippet::config::{Config, GeneralConfig};
+use crate::snippet::config::Config;
 use super::ConfigTab;
 
 pub struct GeneralTab {

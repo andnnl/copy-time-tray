@@ -92,7 +92,7 @@ mod platform {
     use gtk::{glib, Menu, MenuItem, SeparatorMenuItem};
     use libappindicator::{AppIndicator, AppIndicatorStatus};
     use notify_rust::Notification;
-    use snippet::ui::config_dialog;
+    use snippet::ui::config_window;
 
     fn copy_to_clipboard(text: &str) {
         let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);

@@ -1,7 +1,7 @@
 use gtk::prelude::*;
 use crate::snippet::config::{
-    Config, SyncProvider, GiteeConfig, SyncStatus, SyncHistoryEntry,
-    SyncDirection, SyncResultType,
+    Config, SyncProvider, SyncStatus, SyncHistoryEntry,
+    SyncResultType,
 };
 use super::ConfigTab;
 
@@ -105,7 +105,7 @@ impl SyncTab {
         entry
     }
 
-    fn create_row(label_text: &str, widget: &gtk::Widget) -> gtk::Box {
+    fn create_row(label_text: &str, widget: &impl IsA<gtk::Widget>) -> gtk::Box {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let label = gtk::Label::new(Some(label_text));
         label.set_xalign(0.0);
