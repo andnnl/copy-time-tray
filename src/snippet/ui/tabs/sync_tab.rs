@@ -354,6 +354,97 @@ impl ConfigTab for SyncTab {
         // Separator
         container.pack_start(&gtk::Separator::new(gtk::Orientation::Horizontal), false, false, 8);
 
+        // Manual sync button
+        let sync_button = gtk::Button::with_label("立即同步");
+        sync_button.style_context().add_class("suggested-action");
+        let sync_provider_combo = self.provider_combo.clone();
+        let sync_gh_token = self.gh_token_entry.clone();
+        let sync_gh_owner = self.owner_entry.clone();
+        let sync_gh_repo = self.repo_entry.clone();
+        let sync_gh_branch = self.branch_entry.clone();
+        let sync_gitee_api = self.gitee_api_entry.clone();
+        let sync_gitee_token = self.gitee_token_entry.clone();
+        let sync_gitee_desc = self.gitee_gist_desc_entry.clone();
+        let sync_status_label = self.status_label.clone();
+        sync_button.connect_clicked(move |button| {
+            let provider_binding = sync_provider_combo.active_text();
+            let provider = provider_binding.as_deref().unwrap_or("github");
+            if provider == "gitee" {
+                let api_base = sync_gitee_api.text().to_string();
+                let token = sync_gitee_token.text().to_string();
+                let gist_desc = sync_gitee_desc.text().to_string();
+                if api_base.is_empty() || token.is_empty() {
+                    let _ = notify_rust::Notification::new()
+                        .summary("同步失败")
+                        .body("请先填写 Gitee API 地址和 Token")
+                        .show();
+                    return;
+                }
+                button.set_sensitive(false);
+                button.set_label("同步中...");
+                let (sender, receiver) = async_channel::bounded(1);
+                std::thread::spawn(move || {
+                    let config = crate::snippet::config::Config {
+                        sync: Some(crate::snippet::config::SyncConfig {
+                            provider: crate::snippet::config::SyncProvider::Gitee,
+                            owner: String::new(),
+                            repo: String::new(),
+                            branch: String::new(),
+                            token: String::new(),
+                            gitee_config: crate::snippet::config::GiteeConfig {
+                                api_base,
+                                token,
+                                auto_sync: true,
+                                sync_interval: 300,
+                                gist_id: None,
+                                gist_description: gist_desc,
+                            },
+                        }),
+                        general: crate::snippet::config::GeneralConfig::default(),
+                        sync_status: crate::snippet::config::SyncStatus::default(),
+                    };
+                    let client = crate::snippet::sync::RealHttpClient::new();
+                    let result = crate::snippet::sync::pull(&config.sync.unwrap(), &client);
+                    let _ = sender.send_blocking(result);
+                });
+                let button_weak = button.downgrade();
+                let status_weak = sync_status_label.downgrade();
+                glib::spawn_future_local(async move {
+                    while let Ok(result) = receiver.recv().await {
+                        if let Some(button) = button_weak.upgrade() {
+                            button.set_sensitive(true);
+                            button.set_label("立即同步");
+                        }
+                        match result {
+                            Ok(snippets) => {
+                                let count = snippets.len();
+                                let _ = notify_rust::Notification::new()
+                                    .summary("同步成功")
+                                    .body(&format!("已同步 {} 个片段", count))
+                                    .show();
+                                if let Some(label) = status_weak.upgrade() {
+                                    label.set_text(&format!("同步完成：{} 个片段", count));
+                                }
+                            }
+                            Err(e) => {
+                                let _ = notify_rust::Notification::new()
+                                    .summary("同步失败")
+                                    .body(&e.to_string())
+                                    .show();
+                            }
+                        }
+                    }
+                });
+            } else {
+                // GitHub sync - similar logic
+                let _ = notify_rust::Notification::new()
+                    .summary("GitHub 同步")
+                    .body("GitHub 同步功能开发中...")
+                    .show();
+            }
+        });
+        container.pack_start(&sync_button, false, false, 0);
+
         // Status area
         let status_frame = gtk::Frame::new(Some("同步状态"));
         status_frame.add(&self.status_label);
