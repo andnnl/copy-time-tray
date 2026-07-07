@@ -384,27 +384,66 @@ impl ConfigTab for SyncTab {
                 button.set_label("同步中...");
                 let (sender, receiver) = async_channel::bounded(1);
                 std::thread::spawn(move || {
-                    let config = crate::snippet::config::Config {
-                        sync: Some(crate::snippet::config::SyncConfig {
-                            provider: crate::snippet::config::SyncProvider::Gitee,
-                            owner: String::new(),
-                            repo: String::new(),
-                            branch: String::new(),
-                            token: String::new(),
-                            gitee_config: crate::snippet::config::GiteeConfig {
-                                api_base,
-                                token,
-                                auto_sync: true,
-                                sync_interval: 300,
-                                gist_id: None,
-                                gist_description: gist_desc,
-                            },
-                        }),
-                        general: crate::snippet::config::GeneralConfig::default(),
-                        sync_status: crate::snippet::config::SyncStatus::default(),
+                    let sync_config = crate::snippet::config::SyncConfig {
+                        provider: crate::snippet::config::SyncProvider::Gitee,
+                        owner: String::new(),
+                        repo: String::new(),
+                        branch: String::new(),
+                        token: String::new(),
+                        gitee_config: crate::snippet::config::GiteeConfig {
+                            api_base,
+                            token,
+                            auto_sync: true,
+                            sync_interval: 300,
+                            gist_id: None,
+                            gist_description: gist_desc,
+                        },
                     };
                     let client = crate::snippet::sync::RealHttpClient::new();
-                    let result = crate::snippet::sync::pull(&config.sync.unwrap(), &client);
+                    
+                    // First pull from Gitee
+                    let pull_result = crate::snippet::sync::pull(&sync_config, &client);
+                    
+                    // Then push local snippets to Gitee
+                    let push_result = if let Some(manager) = crate::MANAGER.get().and_then(|m| m.lock().ok()) {
+                        let local_snippets: Vec<crate::snippet::model::Snippet> = manager
+                            .with_store(|store| {
+                                store.list()
+                                    .iter()
+                                    .filter(|s| !s.deleted)
+                                    .cloned()
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        
+                        if !local_snippets.is_empty() {
+                            crate::snippet::sync::push(&sync_config, &client, &local_snippets)
+                        } else {
+                            Ok(Vec::new())
+                        }
+                    } else {
+                        Err(crate::snippet::sync::SyncError::Http("Manager not initialized".to_string()))
+                    };
+                    
+                    // Combine results
+                    let result = match (pull_result, push_result) {
+                        (Ok(pull_snippets), Ok(_)) => {
+                            // Re-pull after push to get updated list
+                            crate::snippet::sync::pull(&sync_config, &client)
+                        }
+                        (Ok(pull_snippets), Err(e)) => {
+                            // Pull succeeded but push failed
+                            Ok(pull_snippets)
+                        }
+                        (Err(e), Ok(_)) => {
+                            // Pull failed but push succeeded
+                            Err(e)
+                        }
+                        (Err(e), Err(_)) => {
+                            Err(e)
+                        }
+                    };
+                    
                     let _ = sender.send_blocking(result);
                 });
                 let button_weak = button.downgrade();
