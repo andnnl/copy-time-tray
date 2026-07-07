@@ -132,13 +132,28 @@ impl SnippetStore {
     }
 
     pub fn load_from_sync(&mut self, remote_snippets: Vec<Snippet>) -> Result<(), StoreError> {
+        use std::collections::HashMap;
+
+        let mut by_id: HashMap<String, usize> = self.data.snippets.iter().enumerate()
+            .map(|(i, s)| (s.id.clone(), i))
+            .collect();
+
         for remote in remote_snippets {
-            if let Some(existing) = self
-                .data
-                .snippets
-                .iter_mut()
-                .find(|s| s.id == remote.id)
-            {
+            // First try matching by gitee_gist_id (for folders synced via gist)
+            if let Some(gist_id) = &remote.gitee_gist_id {
+                if let Some(existing) = self.data.snippets.iter_mut().find(|s| {
+                    s.gitee_gist_id.as_deref() == Some(gist_id)
+                }) {
+                    if remote.update_date > existing.update_date {
+                        *existing = remote;
+                    }
+                    continue;
+                }
+            }
+
+            // Fall back to matching by id
+            if let Some(idx) = by_id.get(&remote.id) {
+                let existing = &mut self.data.snippets[*idx];
                 if remote.update_date > existing.update_date {
                     *existing = remote;
                 }
