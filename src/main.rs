@@ -239,7 +239,7 @@ mod platform {
                     glib::ControlFlow::Break
                 });
 
-                let sync_result = manager.do_pull().and_then(|_| manager.do_push());
+                                let sync_result = manager.do_pull_with_retry().and_then(|_| manager.do_push());
                 let sync_result = std::sync::Arc::new(std::sync::Mutex::new(sync_result));
 
                 glib::idle_add(move || {
@@ -411,7 +411,7 @@ mod platform {
                                     continue;
                                 }
                                 
-                                let sync_result = manager.do_pull().and_then(|_| manager.do_push());
+                let sync_result = manager.do_pull_with_retry().and_then(|_| manager.do_push());
                                 match sync_result {
                                     Ok(_) => {
                                         let _ = notify_rust::Notification::new()
@@ -541,23 +541,31 @@ fn handle_ui_response(response: UiResponse) {
                     .summary("创建失败")
                     .body(&format!("{}", e))
                     .show();
+            } else {
+                manager.schedule_push();
             }
             #[cfg(target_os = "windows")]
             send_refresh_to_search();
         }
         UiResponse::SnippetUpdated(snippet) => {
             let id = snippet.id.clone();
-            let _ = manager.with_store_mut(|store| {
+            let update_result = manager.with_store_mut(|store| {
                 store.update(&id, |s| {
                     s.name = snippet.name.clone();
                     s.content = snippet.content.clone();
                 })
             });
+            if update_result.is_ok() {
+                manager.schedule_push();
+            }
             #[cfg(target_os = "windows")]
             send_refresh_to_search();
         }
         UiResponse::SnippetDeleted(id) => {
-            let _ = manager.with_store_mut(|store| store.delete(&id));
+            let del_result = manager.with_store_mut(|store| store.delete(&id));
+            if del_result.is_ok() {
+                manager.schedule_push();
+            }
             #[cfg(target_os = "windows")]
             send_refresh_to_search();
         }
