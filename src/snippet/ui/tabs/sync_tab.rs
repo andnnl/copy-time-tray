@@ -419,7 +419,7 @@ impl ConfigTab for SyncTab {
                         if !local_snippets.is_empty() {
                             crate::snippet::sync::push(&sync_config, &client, &local_snippets)
                         } else {
-                            Ok(Vec::new())
+                            Ok((Vec::new(), None))
                         }
                     } else {
                         Err(crate::snippet::sync::SyncError::Http("Manager not initialized".to_string()))

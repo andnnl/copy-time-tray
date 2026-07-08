@@ -447,14 +447,14 @@ pub fn push(
     config: &SyncConfig,
     client: &dyn HttpClient,
     snippets: &[Snippet],
-) -> Result<Vec<String>, SyncError> {
+) -> Result<(Vec<String>, Option<String>), SyncError> {
     match config.provider {
         SyncProvider::Gitee => {
-            push_to_single_gist(config, snippets)?;
-            Ok(Vec::new())
+            let gist_id = push_to_single_gist(config, snippets)?;
+            Ok((Vec::new(), Some(gist_id)))
         }
         SyncProvider::Github => {
-            push_github(config, client, snippets)
+            push_github(config, client, snippets).map(|failed| (failed, None))
         }
     }
 }

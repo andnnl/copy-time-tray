@@ -122,7 +122,16 @@ impl SnippetManager {
         }
         for attempt in 0..MAX_RETRIES {
             match sync::push(sync_config, &self.client, &pending) {
-                Ok(_) => return Ok(()),
+                Ok((_, gist_id)) => {
+                    if let Some(id) = gist_id {
+                        let mut cfg = Config::load().map_err(|e| e.to_string())?;
+                        if let Some(ref mut sync) = cfg.sync {
+                            sync.gitee_config.gist_id = Some(id);
+                            cfg.save().map_err(|e| e.to_string())?;
+                        }
+                    }
+                    return Ok(())
+                }
                 Err(e) => {
                     let backoff = Duration::from_secs(INITIAL_BACKOFF_SECS * (1 << attempt));
                     log::warn!(
@@ -176,7 +185,7 @@ impl SnippetManager {
                     return;
                 }
                 match sync::push(&sync_config, &client, &pending) {
-                    Ok(_) => return,
+                    Ok((_, _gist_id)) => return,
                     Err(e) => {
                         let backoff = Duration::from_secs(INITIAL_BACKOFF_SECS * (1 << attempt));
                         log::warn!(
