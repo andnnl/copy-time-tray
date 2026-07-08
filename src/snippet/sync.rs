@@ -204,7 +204,7 @@ pub fn generate_file_id_from_path(relative_path: &str) -> String {
 pub fn pull(config: &SyncConfig, client: &dyn HttpClient) -> Result<Vec<Snippet>, SyncError> {
     match config.provider {
         SyncProvider::Gitee => {
-            pull_gitee(config)
+            pull_from_single_gist(config)
         }
         SyncProvider::Github => {
             pull_github(config, client)
@@ -276,6 +276,67 @@ fn pull_gitee(config: &SyncConfig) -> Result<Vec<Snippet>, SyncError> {
             };
             snippets.push(snippet);
         }
+    }
+
+    Ok(snippets)
+}
+
+fn pull_from_single_gist(config: &SyncConfig) -> Result<Vec<Snippet>, SyncError> {
+    let gitee_config = &config.gitee_config;
+    let gist_id = match &gitee_config.gist_id {
+        Some(id) => id,
+        None => return Ok(Vec::new()),
+    };
+
+    let gitee_client = GiteeClient::new(gitee_config.clone());
+    let gist = gitee_client
+        .get_gist(gist_id)
+        .map_err(|e| SyncError::Http(e.to_string()))?;
+
+    let tree_file = gist.files.get("tree.json").ok_or_else(|| {
+        SyncError::Parse("tree.json not found in gist".into())
+    })?;
+
+    let tree_content = tree_file.content.as_deref().unwrap_or("");
+    if tree_content.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let tree_entries: Vec<TreeEntry> =
+        serde_json::from_str(tree_content).map_err(|e| {
+            SyncError::Parse(format!("Failed to parse tree.json: {}", e))
+        })?;
+
+    let mut snippets = Vec::new();
+    for entry in tree_entries {
+        if entry.deleted {
+            continue;
+        }
+
+        let content = match entry.entry_type {
+            crate::snippet::model::SnippetType::Snippet => {
+                if let Some(ref content_file) = entry.content_file {
+                    gist.files.get(content_file).and_then(|f| f.content.clone())
+                } else {
+                    None
+                }
+            }
+            crate::snippet::model::SnippetType::Folder => None,
+        };
+
+        snippets.push(Snippet {
+            id: entry.id,
+            parent_id: entry.parent_id,
+            name: entry.name,
+            snippet_type: entry.entry_type,
+            content,
+            sort: entry.sort,
+            deleted: entry.deleted,
+            synced: true,
+            create_date: entry.create_date,
+            update_date: entry.update_date,
+            gitee_gist_id: None,
+        });
     }
 
     Ok(snippets)
@@ -910,5 +971,15 @@ mod tests {
         let snip_entry = entries.iter().find(|e| e.entry_type == crate::snippet::model::SnippetType::Snippet).unwrap();
         assert!(snip_entry.content_file.is_some());
         assert!(snip_entry.content_file.as_ref().unwrap().ends_with("_ping.txt"));
+    }
+
+    #[test]
+    fn test_pull_from_single_gist_reconstructs_snippets() {
+        let tree_content = "[{\"id\":\"f1\",\"parent_id\":null,\"name\":\"网络工具\",\"type\":\"folder\",\"sort\":0,\"deleted\":false,\"create_date\":\"2026-01-01T00:00:00Z\",\"update_date\":\"2026-01-01T00:00:00Z\"},{\"id\":\"s1\",\"parent_id\":\"f1\",\"name\":\"ping\",\"type\":\"snippet\",\"sort\":0,\"deleted\":false,\"create_date\":\"2026-01-01T00:00:00Z\",\"update_date\":\"2026-01-02T00:00:00Z\",\"content_file\":\"s1_ping.txt\"}]";
+        let entries: Vec<TreeEntry> = serde_json::from_str(tree_content).unwrap();
+        assert_eq!(entries.len(), 2);
+        let snip = entries.iter().find(|e| e.id == "s1").unwrap();
+        assert_eq!(snip.content_file, Some("s1_ping.txt".into()));
+        assert_eq!(snip.parent_id, Some("f1".into()));
     }
 }
