@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 use crate::snippet::config::{SyncConfig, SyncProvider, GiteeConfig};
 use crate::snippet::gitee::types::{Gist, GistCreate, GistFileCreate, GistUpdate};
@@ -39,6 +40,45 @@ pub struct GitTreeEntry {
 #[derive(Debug, Deserialize)]
 pub struct GitTreeResponse {
     pub tree: Vec<GitTreeEntry>,
+}
+
+/// Entry in tree.json representing a snippet/folder in the tree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TreeEntry {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub entry_type: crate::snippet::model::SnippetType,
+    pub sort: i32,
+    pub deleted: bool,
+    pub create_date: DateTime<Utc>,
+    pub update_date: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_file: Option<String>,
+}
+
+/// Build tree entries from snippets for serialization to tree.json.
+pub fn build_tree_entries(snippets: &[&Snippet]) -> Vec<TreeEntry> {
+    snippets
+        .iter()
+        .map(|s| TreeEntry {
+            id: s.id.clone(),
+            parent_id: s.parent_id.clone(),
+            name: s.name.clone(),
+            entry_type: s.snippet_type.clone(),
+            sort: s.sort,
+            deleted: s.deleted,
+            create_date: s.create_date,
+            update_date: s.update_date,
+            content_file: match s.snippet_type {
+                crate::snippet::model::SnippetType::Snippet => {
+                    Some(format!("{}_{}.txt", s.id, s.name))
+                }
+                crate::snippet::model::SnippetType::Folder => None,
+            },
+        })
+        .collect()
 }
 
 pub struct HttpResponse {
@@ -178,11 +218,21 @@ fn pull_gitee(config: &SyncConfig) -> Result<Vec<Snippet>, SyncError> {
         .list_gists()
         .map_err(|e| SyncError::Http(e.to_string()))?;
 
+    eprintln!("[DEBUG] pull_gitee: Found {} gists total", gists.len());
+    for g in &gists {
+        eprintln!("[DEBUG] pull_gitee: Gist id={}, desc={:?}, files={}", g.id, g.description, g.files.len());
+    }
+
     let target_description = &config.gitee_config.gist_description;
+    eprintln!("[DEBUG] pull_gitee: Looking for desc={:?}", target_description);
     
     // Find the target Gist by description
     let target_gist = gists.iter().find(|g| {
-        g.description.as_deref() == Some(target_description)
+        let matches = g.description.as_deref() == Some(target_description);
+        if !matches {
+            eprintln!("[DEBUG] pull_gitee: Gist {} desc={:?} != {:?}", g.id, g.description, target_description);
+        }
+        matches
     });
 
     let mut snippets = Vec::new();
@@ -339,7 +389,8 @@ pub fn push(
 ) -> Result<Vec<String>, SyncError> {
     match config.provider {
         SyncProvider::Gitee => {
-            push_gitee(config, snippets)
+            push_to_single_gist(config, snippets)?;
+            Ok(Vec::new())
         }
         SyncProvider::Github => {
             push_github(config, client, snippets)
@@ -391,10 +442,20 @@ fn push_gitee(
         }
         None => {
             eprintln!("[DEBUG] push_gitee: Creating new gist with description: {}", target_description);
-            // Create new gist
+            // Create new gist with first snippet as placeholder
+            let first_snippet = snippet_list.first().unwrap();
+            let first_filename = format!("{}.sh", first_snippet.name);
+            let first_content = first_snippet.content.as_deref().unwrap_or("");
+            
+            let mut files = HashMap::new();
+            files.insert(
+                first_filename,
+                GistFileCreate::new(Some(first_content)),
+            );
+            
             let create = GistCreate {
                 description: Some(target_description),
-                files: HashMap::new(),
+                files,
                 public: false,
             };
             match gitee_client.create_gist(&create) {
@@ -448,6 +509,78 @@ fn push_gitee(
             failed_ids.len()
         )))
     }
+}
+
+/// Push all snippets to a single Gitee gist with tree.json + content files.
+fn push_to_single_gist(
+    config: &SyncConfig,
+    snippets: &[Snippet],
+) -> Result<String, SyncError> {
+    let gitee_config = &config.gitee_config;
+    let active: Vec<&Snippet> = snippets.iter().filter(|s| !s.deleted).collect();
+
+    if active.is_empty() {
+        return Ok(String::new());
+    }
+
+    let tree_entries = build_tree_entries(&active);
+    let tree_json = serde_json::to_string_pretty(&tree_entries)
+        .map_err(|e| SyncError::Store(e.to_string()))?;
+
+    let mut files: HashMap<String, String> = HashMap::new();
+    files.insert("tree.json".into(), tree_json);
+    for s in &active {
+        if let Some(ref content) = s.content {
+            let filename = format!("{}_{}.txt", s.id, s.name);
+            files.insert(filename, content.clone());
+        }
+    }
+
+    let gist_id = match &gitee_config.gist_id {
+        Some(id) => {
+            let gitee_client = GiteeClient::new(gitee_config.clone());
+            match gitee_client.get_gist(id) {
+                Ok(_) => id.clone(),
+                Err(_) => create_new_gist(gitee_config, &files)?,
+            }
+        }
+        None => create_new_gist(gitee_config, &files)?,
+    };
+
+    let mut update = GistUpdate::new(Some(&gitee_config.gist_description));
+    for (filename, content) in &files {
+        update = update.add_file(filename, content);
+    }
+
+    let gitee_client = GiteeClient::new(gitee_config.clone());
+    gitee_client
+        .update_gist(&gist_id, &update)
+        .map_err(|e| SyncError::Http(e.to_string()))?;
+
+    Ok(gist_id)
+}
+
+fn create_new_gist(
+    gitee_config: &GiteeConfig,
+    files: &HashMap<String, String>,
+) -> Result<String, SyncError> {
+    let mut gist_files = HashMap::new();
+    for (name, content) in files {
+        gist_files.insert(name.clone(), GistFileCreate::new(Some(content)));
+    }
+
+    let create = GistCreate {
+        description: Some(&gitee_config.gist_description),
+        files: gist_files,
+        public: false,
+    };
+
+    let gitee_client = GiteeClient::new(gitee_config.clone());
+    let gist = gitee_client
+        .create_gist(&create)
+        .map_err(|e| SyncError::Http(e.to_string()))?;
+
+    Ok(gist.id)
 }
 
 fn push_github(
@@ -725,5 +858,57 @@ mod tests {
         let snippet = Snippet::new_snippet("bad/name".into(), "content".into(), None);
         let path = snippet_to_path(&snippet).unwrap();
         assert_eq!(path, "snippets/bad_name.yaml");
+    }
+
+    #[test]
+    fn test_tree_entry_serialization() {
+        use crate::snippet::model::SnippetType;
+        let entry = TreeEntry {
+            id: "uuid-1".into(),
+            parent_id: None,
+            name: "网络工具".into(),
+            entry_type: SnippetType::Folder,
+            sort: 0,
+            deleted: false,
+            create_date: chrono::Utc::now(),
+            update_date: chrono::Utc::now(),
+            content_file: None,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"id\":\"uuid-1\""));
+        assert!(json.contains("\"type\":\"folder\""));
+        assert!(!json.contains("\"content_file\""), "content_file should be absent for folder");
+    }
+
+    #[test]
+    fn test_tree_entry_snippet_has_content_file() {
+        use crate::snippet::model::SnippetType;
+        let entry = TreeEntry {
+            id: "uuid-2".into(),
+            parent_id: Some("uuid-1".into()),
+            name: "ping".into(),
+            entry_type: SnippetType::Snippet,
+            sort: 0,
+            deleted: false,
+            create_date: chrono::Utc::now(),
+            update_date: chrono::Utc::now(),
+            content_file: Some("uuid-2_ping.txt".into()),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"type\":\"snippet\""));
+        assert!(json.contains("\"content_file\":\"uuid-2_ping.txt\""));
+    }
+
+    #[test]
+    fn test_build_tree_entries_includes_folders_and_snippets() {
+        let folder = Snippet::new_folder("网络工具".into(), None);
+        let snippet = Snippet::new_snippet("ping".into(), "echo ping".into(), Some(folder.id.clone()));
+
+        let entries = build_tree_entries(&[&folder, &snippet]);
+        assert_eq!(entries.len(), 2);
+        
+        let snip_entry = entries.iter().find(|e| e.entry_type == crate::snippet::model::SnippetType::Snippet).unwrap();
+        assert!(snip_entry.content_file.is_some());
+        assert!(snip_entry.content_file.as_ref().unwrap().ends_with("_ping.txt"));
     }
 }
