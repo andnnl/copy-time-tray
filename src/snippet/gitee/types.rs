@@ -39,6 +39,7 @@ pub struct GistUpdate<'a> {
 #[derive(Debug, Clone, Serialize)]
 pub struct GistFileUpdate<'a> {
     pub content: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub filename: Option<&'a str>,
 }
 
@@ -61,7 +62,18 @@ impl<'a> GistUpdate<'a> {
             name.into(),
             GistFileUpdate {
                 content: Some(content),
-                filename: Some(name),
+                filename: None,
+            },
+        );
+        self
+    }
+
+    pub fn rename_file(mut self, old_name: &'a str, new_name: &'a str, content: &'a str) -> Self {
+        self.files.insert(
+            old_name.into(),
+            GistFileUpdate {
+                content: Some(content),
+                filename: Some(new_name),
             },
         );
         self

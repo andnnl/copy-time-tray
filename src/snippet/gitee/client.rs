@@ -184,6 +184,8 @@ impl GiteeClient {
 mod tests {
     use super::*;
     use crate::snippet::config::GiteeConfig;
+    use crate::snippet::gitee::types;
+    use std::collections::HashMap;
 
     #[test]
     fn test_url_gist_constructs_correct_url() {
@@ -213,5 +215,104 @@ mod tests {
         let client = GiteeClient::new(config);
         let url = client.url_gist("xyz789");
         assert_eq!(url, "http://localhost:9999/gists/xyz789");
+    }
+
+    /// Integration test: create gist with multiple files, verify via get_gist
+    /// Requires GITEE_TOKEN env var or reads from config.yaml
+    #[test]
+    fn test_create_and_update_gist_with_multiple_files() {
+        let token = std::env::var("GITEE_TOKEN").unwrap_or_else(|_| {
+            let config_path = dirs::config_dir()
+                .expect("config_dir")
+                .join("copy-time-tray/config.yaml");
+            let content = std::fs::read_to_string(&config_path).expect("config.yaml not found");
+            let token_line = content.lines()
+                .skip_while(|l| !l.contains("gitee_config:"))
+                .skip(1)
+                .find(|l| l.contains("token:"))
+                .expect("token not found in config");
+            token_line.split("token:").nth(1).expect("token parse failed").trim().to_string()
+        });
+
+        let config = GiteeConfig {
+            api_base: "https://gitee.com/api/v5".into(),
+            token,
+            auto_sync: true,
+            sync_interval: 300,
+            gist_id: None,
+            gist_description: "TestGist_MultiFiles".into(),
+        };
+        let client = GiteeClient::new(config.clone());
+
+        let mut files = HashMap::new();
+        files.insert("tree.json".into(), types::GistFileCreate::new(Some("[{\"id\":\"test\"}]")));
+        files.insert("test.txt".into(), types::GistFileCreate::new(Some("test content")));
+
+        let create = types::GistCreate {
+            description: Some("TestGist_MultiFiles"),
+            files,
+            public: false,
+        };
+
+        let gist = client.create_gist(&create).expect("create_gist failed");
+        println!("Created gist: {}", gist.id);
+
+        let fetched = client.get_gist(&gist.id).expect("get_gist failed");
+        println!("Fetched gist files: {:?}", fetched.files.keys().collect::<Vec<_>>());
+        assert!(fetched.files.contains_key("tree.json"), "Missing tree.json");
+        assert!(fetched.files.contains_key("test.txt"), "Missing test.txt");
+
+        client.delete_gist(&gist.id).expect("delete_gist failed");
+        println!("Deleted test gist: {}", gist.id);
+    }
+
+    /// Test update_gist: add new file to existing gist
+    #[test]
+    fn test_update_gist_adds_new_file() {
+        let token = std::env::var("GITEE_TOKEN").unwrap_or_else(|_| {
+            let config_path = dirs::config_dir()
+                .expect("config_dir")
+                .join("copy-time-tray/config.yaml");
+            let content = std::fs::read_to_string(&config_path).expect("config.yaml not found");
+            let token_line = content.lines()
+                .skip_while(|l| !l.contains("gitee_config:"))
+                .skip(1)
+                .find(|l| l.contains("token:"))
+                .expect("token not found in config");
+            token_line.split("token:").nth(1).expect("token parse failed").trim().to_string()
+        });
+
+        let config = GiteeConfig {
+            api_base: "https://gitee.com/api/v5".into(),
+            token,
+            auto_sync: true,
+            sync_interval: 300,
+            gist_id: None,
+            gist_description: "TestGist_Update".into(),
+        };
+        let client = GiteeClient::new(config.clone());
+
+        let mut files = HashMap::new();
+        files.insert("initial.txt".into(), types::GistFileCreate::new(Some("initial content")));
+        let create = types::GistCreate {
+            description: Some("TestGist_Update"),
+            files,
+            public: false,
+        };
+        let gist = client.create_gist(&create).expect("create_gist failed");
+        println!("Created gist with 1 file: {}", gist.id);
+
+        let update = types::GistUpdate::new(Some("TestGist_Update"))
+            .add_file("new_file.txt", "new content");
+        client.update_gist(&gist.id, &update).expect("update_gist failed");
+        println!("Updated gist");
+
+        let fetched = client.get_gist(&gist.id).expect("get_gist failed");
+        println!("Files after update: {:?}", fetched.files.keys().collect::<Vec<_>>());
+        assert!(fetched.files.contains_key("initial.txt"), "Missing initial.txt");
+        assert!(fetched.files.contains_key("new_file.txt"), "Missing new_file.txt - UPDATE FAILED!");
+
+        client.delete_gist(&gist.id).expect("delete_gist failed");
+        println!("Deleted test gist");
     }
 }

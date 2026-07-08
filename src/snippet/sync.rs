@@ -390,6 +390,8 @@ fn push_to_single_gist(
     let gitee_config = &config.gitee_config;
     let active: Vec<&Snippet> = snippets.iter().filter(|s| !s.deleted).collect();
 
+    eprintln!("[DEBUG] push_to_single_gist: {} active snippets", active.len());
+
     if active.is_empty() {
         return Ok(String::new());
     }
@@ -403,9 +405,12 @@ fn push_to_single_gist(
     for s in &active {
         if let Some(ref content) = s.content {
             let filename = format!("{}_{}.txt", s.id, s.name);
+            eprintln!("[DEBUG] push_to_single_gist: adding file {} ({} bytes)", filename, content.len());
             files.insert(filename, content.clone());
         }
     }
+
+    eprintln!("[DEBUG] push_to_single_gist: {} files to upload", files.len());
 
     let gist_id = match &gitee_config.gist_id {
         Some(id) => {
