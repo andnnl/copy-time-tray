@@ -217,6 +217,14 @@ mod platform {
         });
         menu.append(&snippet_item);
 
+        let sync_item = MenuItem::with_label("同步");
+        let cmd_tx_for_sync = _cmd_tx.clone();
+        sync_item.connect_activate(move |_| {
+            eprintln!("[SYNC] Sync menu clicked");
+            let _ = cmd_tx_for_sync.send(UiCommand::Sync);
+        });
+        menu.append(&sync_item);
+
         let quit_item = MenuItem::with_label("退出");
         quit_item.connect_activate(|_| gtk::main_quit());
         menu.append(&quit_item);
@@ -1596,6 +1604,20 @@ fn main() {
                             launch_snippet_dialog_linux(crossbeam_channel::unbounded().0);
                             DIALOG_OPEN.store(false, std::sync::atomic::Ordering::SeqCst);
                         });
+                    }
+                    UiCommand::Sync => {
+                        eprintln!("[SYNC] UiCommand::Sync received");
+                        let manager_guard = MANAGER.get().and_then(|m| m.lock().ok());
+                        if let Some(manager) = manager_guard {
+                            eprintln!("[SYNC] Triggering push...");
+                            let _ = manager.do_push();
+                            eprintln!("[SYNC] Triggering pull...");
+                            let _ = manager.do_pull_with_retry();
+                            let _ = notify_rust::Notification::new()
+                                .summary("同步完成")
+                                .body("snippet 已同步到 Gitee")
+                                .show();
+                        }
                     }
                     _ => {}
                 }

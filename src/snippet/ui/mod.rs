@@ -15,6 +15,7 @@ pub enum UiCommand {
     Hide,
     CopyToClipboard(String),
     RefreshSnippets(Vec<Snippet>),
+    Sync,
 }
 
 #[derive(Debug)]

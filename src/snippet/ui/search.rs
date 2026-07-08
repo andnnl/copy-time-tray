@@ -73,6 +73,7 @@ impl SearchPopup {
                         self.filter_snippets();
                     }
                     Ok(UiCommand::CopyToClipboard(_)) => {}
+                    Ok(UiCommand::Sync) => {}
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => break,
                 }
