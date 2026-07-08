@@ -139,19 +139,6 @@ impl SnippetStore {
             .collect();
 
         for remote in remote_snippets {
-            // First try matching by gitee_gist_id (for folders synced via gist)
-            if let Some(gist_id) = &remote.gitee_gist_id {
-                if let Some(existing) = self.data.snippets.iter_mut().find(|s| {
-                    s.gitee_gist_id.as_deref() == Some(gist_id)
-                }) {
-                    if remote.update_date > existing.update_date {
-                        *existing = remote;
-                    }
-                    continue;
-                }
-            }
-
-            // Fall back to matching by id
             if let Some(idx) = by_id.get(&remote.id) {
                 let existing = &mut self.data.snippets[*idx];
                 if remote.update_date > existing.update_date {
@@ -329,5 +316,28 @@ mod tests {
         let reloaded = SnippetStore::new(path).unwrap();
         assert_eq!(reloaded.list().len(), 1);
         assert_eq!(reloaded.list()[0].name, "persist");
+    }
+
+    #[test]
+    fn test_load_from_sync_matches_by_id_only() {
+        let (mut store, _dir) = temp_store();
+
+        let mut local = Snippet::new_snippet("old".into(), "local-content".into(), None);
+        local.id = "s1".into();
+        local.gitee_gist_id = Some("gist-xxx".into());
+        local.update_date = chrono::Utc::now() - chrono::Duration::minutes(10);
+        store.add(local).unwrap();
+
+        let mut remote = Snippet::new_snippet("new".into(), "remote-content".into(), None);
+        remote.id = "s1".into();
+        remote.gitee_gist_id = Some("gist-yyy".into());
+        remote.update_date = chrono::Utc::now();
+        remote.synced = true;
+
+        store.load_from_sync(vec![remote]).unwrap();
+
+        let result = store.get("s1").unwrap();
+        assert_eq!(result.content, Some("remote-content".into()));
+        assert_eq!(result.name, "new");
     }
 }
