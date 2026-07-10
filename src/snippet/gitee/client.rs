@@ -219,6 +219,7 @@ mod tests {
     /// Integration test: create gist with multiple files, verify via get_gist
     /// Requires GITEE_TOKEN env var or reads from config.yaml
     #[test]
+    #[ignore = "performs live Gitee Gist create, read, and delete operations"]
     fn test_create_and_update_gist_with_multiple_files() {
         let token = std::env::var("GITEE_TOKEN").unwrap_or_else(|_| {
             let config_path = dirs::config_dir()
@@ -282,6 +283,7 @@ mod tests {
 
     /// Test update_gist: add new file to existing gist
     #[test]
+    #[ignore = "performs live Gitee Gist create, update, read, and delete operations"]
     fn test_update_gist_adds_new_file() {
         let token = std::env::var("GITEE_TOKEN").unwrap_or_else(|_| {
             let config_path = dirs::config_dir()

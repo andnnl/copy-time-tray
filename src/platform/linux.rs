@@ -20,6 +20,20 @@ fn copy_time(format: &str) {
     copy_to_clipboard(&get_time_text(format));
 }
 
+fn sync_success_notification_body() -> &'static str {
+    "snippet 已同步到远程"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sync_success_notification_body;
+
+    #[test]
+    fn sync_success_notification_is_remote_neutral() {
+        assert_eq!(sync_success_notification_body(), "snippet 已同步到远程");
+    }
+}
+
 pub fn main(
     _cmd_tx: crossbeam_channel::Sender<UiCommand>,
     cmd_rx: crossbeam_channel::Receiver<UiCommand>,
@@ -37,7 +51,9 @@ pub fn main(
                             let result =
                                 manager.do_pull_with_retry().and_then(|_| manager.do_push());
                             let (summary, body) = match result {
-                                Ok(()) => ("同步完成", "snippet 已同步到 Gitee".to_string()),
+                                Ok(()) => {
+                                    ("同步完成", sync_success_notification_body().to_string())
+                                }
                                 Err(error) => ("同步失败", error),
                             };
                             let _ = notify_rust::Notification::new()
