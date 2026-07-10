@@ -722,9 +722,10 @@ pub fn show() {
         }
     });
 
-    // Export button handler
+    // The GTK thread only selects a destination and captures an in-memory snapshot.
+    // JSON conversion and disk I/O run on a worker to keep the dialog responsive.
     let dialog_for_export = dialog.clone();
-    export_button.connect_clicked(move |_| {
+    export_button.connect_clicked(move |button| {
         let file_chooser = gtk::FileChooserDialog::with_buttons::<gtk::Window>(
             Some("导出代码片段"),
             Some(dialog_for_export.upcast_ref::<gtk::Window>()),
@@ -739,35 +740,55 @@ pub fn show() {
         filter.set_name(Some("JSON 文件"));
         filter.add_pattern("*.json");
         file_chooser.add_filter(filter);
+        let file_path = if file_chooser.run() == gtk::ResponseType::Accept {
+            file_chooser.filename()
+        } else {
+            None
+        };
+        file_chooser.close();
 
-        if file_chooser.run() == gtk::ResponseType::Accept {
-            if let Some(file_path) = file_chooser.filename() {
-                if let Some(mg) = crate::app::MANAGER.get().and_then(|m| m.lock().ok()) {
-                    let manager = &*mg;
-                    let all_snippets = manager
-                        .with_store(|store| store.list().to_vec())
-                        .unwrap_or_default();
-                    match crate::snippet::import_export::export_to_termora(
-                        &all_snippets,
-                        &file_path,
-                    ) {
-                        Ok(()) => {
-                            let _ = notify_rust::Notification::new()
-                                .summary("导出成功")
-                                .body(&format!("已导出到 {}", file_path.display()))
-                                .show();
-                        }
-                        Err(e) => {
-                            let _ = notify_rust::Notification::new()
-                                .summary("导出失败")
-                                .body(&format!("{}", e))
-                                .show();
-                        }
+        if let Some(path) = file_path {
+            let snippets = match crate::app::MANAGER.get().and_then(|m| m.lock().ok()) {
+                Some(manager) => manager
+                    .with_store(|store| store.list().to_vec())
+                    .unwrap_or_default(),
+                None => {
+                    let _ = notify_rust::Notification::new()
+                        .summary("导出失败")
+                        .body("Snippet 管理器未初始化")
+                        .show();
+                    return;
+                }
+            };
+
+            button.set_sensitive(false);
+            let (sender, receiver) = async_channel::bounded(1);
+            transfer::spawn_export(snippets, path.clone(), sender);
+            let button = button.clone();
+            gtk::glib::spawn_future_local(async move {
+                match receiver.recv().await {
+                    Ok(transfer::ExportResult::Exported(Ok(()))) => {
+                        let _ = notify_rust::Notification::new()
+                            .summary("导出成功")
+                            .body(&format!("已导出到 {}", path.display()))
+                            .show();
+                    }
+                    Ok(transfer::ExportResult::Exported(Err(error))) => {
+                        let _ = notify_rust::Notification::new()
+                            .summary("导出失败")
+                            .body(&error)
+                            .show();
+                    }
+                    Err(error) => {
+                        let _ = notify_rust::Notification::new()
+                            .summary("导出失败")
+                            .body(&error.to_string())
+                            .show();
                     }
                 }
-            }
+                button.set_sensitive(true);
+            });
         }
-        file_chooser.close();
     });
 
     dialog.show_all();
