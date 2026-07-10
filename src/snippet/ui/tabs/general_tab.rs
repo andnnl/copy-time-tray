@@ -1,6 +1,6 @@
-use gtk::prelude::*;
-use crate::snippet::config::Config;
 use super::ConfigTab;
+use crate::snippet::config::Config;
+use gtk::prelude::*;
 
 pub struct GeneralTab {
     pub auto_sync_switch: gtk::Switch,
@@ -63,7 +63,9 @@ impl ConfigTab for GeneralTab {
 
         sync_box.pack_start(
             &Self::create_switch_row("启动时自动同步", &self.auto_sync_switch),
-            false, false, 0
+            false,
+            false,
+            0,
         );
 
         let interval_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -88,15 +90,21 @@ impl ConfigTab for GeneralTab {
 
         notify_box.pack_start(
             &Self::create_switch_row("同步成功时通知", &self.notify_success_switch),
-            false, false, 0
+            false,
+            false,
+            0,
         );
         notify_box.pack_start(
             &Self::create_switch_row("同步失败时通知", &self.notify_failure_switch),
-            false, false, 0
+            false,
+            false,
+            0,
         );
         notify_box.pack_start(
             &Self::create_switch_row("创建 Snippet 时通知", &self.notify_create_switch),
-            false, false, 0
+            false,
+            false,
+            0,
         );
 
         notify_frame.add(&notify_box);
@@ -105,7 +113,9 @@ impl ConfigTab for GeneralTab {
 
     fn on_save(&self) -> Result<(), String> {
         let interval_text = self.sync_interval_entry.text().to_string();
-        let interval: u64 = interval_text.parse().map_err(|_| "同步间隔必须是数字".to_string())?;
+        let interval: u64 = interval_text
+            .parse()
+            .map_err(|_| "同步间隔必须是数字".to_string())?;
         if interval < 10 {
             return Err("同步间隔不能小于 10 秒".to_string());
         }
@@ -117,9 +127,13 @@ impl ConfigTab for GeneralTab {
         let general = &config.general;
 
         self.auto_sync_switch.set_active(general.auto_sync);
-        self.sync_interval_entry.set_text(&general.sync_interval.to_string());
-        self.notify_success_switch.set_active(general.notify_on_success);
-        self.notify_failure_switch.set_active(general.notify_on_failure);
-        self.notify_create_switch.set_active(general.notify_on_create);
+        self.sync_interval_entry
+            .set_text(&general.sync_interval.to_string());
+        self.notify_success_switch
+            .set_active(general.notify_on_success);
+        self.notify_failure_switch
+            .set_active(general.notify_on_failure);
+        self.notify_create_switch
+            .set_active(general.notify_on_create);
     }
 }

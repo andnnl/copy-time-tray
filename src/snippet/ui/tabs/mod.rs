@@ -1,6 +1,6 @@
-pub mod sync_tab;
-pub mod general_tab;
 pub mod about_tab;
+pub mod general_tab;
+pub mod sync_tab;
 
 /// 配置 tab 的统一接口
 pub trait ConfigTab {

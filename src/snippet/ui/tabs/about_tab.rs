@@ -1,5 +1,5 @@
-use gtk::prelude::*;
 use super::ConfigTab;
+use gtk::prelude::*;
 
 pub struct AboutTab {
     #[allow(dead_code)]
@@ -43,7 +43,7 @@ impl ConfigTab for AboutTab {
 
         let github_link = gtk::LinkButton::with_label(
             "https://github.com/your-username/copy-time-tray",
-            "GitHub"
+            "GitHub",
         );
         links_box.pack_start(&github_link, false, false, 0);
 
@@ -57,7 +57,7 @@ impl ConfigTab for AboutTab {
 
         // Description
         let desc_label = gtk::Label::new(Some(
-            "一个简洁的系统托盘工具，用于快速复制时间、生成密码和管理代码片段。"
+            "一个简洁的系统托盘工具，用于快速复制时间、生成密码和管理代码片段。",
         ));
         desc_label.set_halign(gtk::Align::Center);
         desc_label.set_line_wrap(true);

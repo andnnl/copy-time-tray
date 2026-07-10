@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SnippetType {
     Folder,
@@ -162,7 +162,9 @@ mod tests {
         assert!(snippet.synced);
         assert_eq!(
             snippet.update_date,
-            Utc.with_ymd_and_hms(2026, 6, 17, 10, 30, 0).single().unwrap()
+            Utc.with_ymd_and_hms(2026, 6, 17, 10, 30, 0)
+                .single()
+                .unwrap()
         );
     }
 

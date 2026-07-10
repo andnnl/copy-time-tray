@@ -1,7 +1,7 @@
 use gtk::prelude::*;
-use gtk::{Dialog, DialogFlags, Entry, ComboBoxText, ResponseType};
+use gtk::{ComboBoxText, Dialog, DialogFlags, Entry, ResponseType};
 
-use crate::snippet::config::{SyncProvider, GiteeConfig};
+use crate::snippet::config::{GiteeConfig, SyncProvider};
 
 #[derive(Debug, Clone)]
 pub struct ConfigDialogResult {

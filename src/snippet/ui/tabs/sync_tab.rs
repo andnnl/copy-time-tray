@@ -1,13 +1,14 @@
-use gtk::prelude::*;
-use gtk::glib;
-use crate::snippet::config::{
-    Config, SyncProvider, SyncStatus, SyncHistoryEntry,
-    SyncResultType,
-};
 use super::ConfigTab;
+use crate::snippet::config::{Config, SyncHistoryEntry, SyncProvider, SyncResultType, SyncStatus};
+use gtk::glib;
+use gtk::prelude::*;
 
 fn show_test_result_dialog(parent: Option<&gtk::Window>, message: &str, is_success: bool) {
-    let title = if is_success { "连接成功" } else { "连接失败" };
+    let title = if is_success {
+        "连接成功"
+    } else {
+        "连接失败"
+    };
     let dialog = gtk::Dialog::with_buttons(
         Some(title),
         parent,
@@ -25,7 +26,9 @@ fn show_test_result_dialog(parent: Option<&gtk::Window>, message: &str, is_succe
 
     let icon = if is_success { "✓" } else { "✗" };
     let icon_label = gtk::Label::new(Some(icon));
-    icon_label.style_context().add_class(if is_success { "success" } else { "error" });
+    icon_label
+        .style_context()
+        .add_class(if is_success { "success" } else { "error" });
     icon_label.set_halign(gtk::Align::Center);
     content.pack_start(&icon_label, false, false, 0);
 
@@ -82,6 +85,11 @@ fn test_gitee_connection(api_base: &str, token: &str) -> Result<String, String> 
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManualSyncAction {
+    ManagerPullThenPush,
+}
+
 pub struct SyncTab {
     pub provider_combo: gtk::ComboBoxText,
     pub github_box: gtk::Box,
@@ -115,7 +123,12 @@ impl SyncTab {
         gh_box.pack_start(&Self::create_row("Owner:", &owner_entry), false, false, 0);
         gh_box.pack_start(&Self::create_row("Repo:", &repo_entry), false, false, 0);
         gh_box.pack_start(&Self::create_row("Branch:", &branch_entry), false, false, 0);
-        gh_box.pack_start(&Self::create_row("Token:", &gh_token_entry), false, false, 0);
+        gh_box.pack_start(
+            &Self::create_row("Token:", &gh_token_entry),
+            false,
+            false,
+            0,
+        );
 
         // GitHub test connection button
         let gh_test_button = gtk::Button::with_label("测试连接");
@@ -124,7 +137,14 @@ impl SyncTab {
         gh_test_button.connect_clicked(move |button| {
             let token = gh_token_for_test.text().to_string();
             if token.is_empty() {
-                show_test_result_dialog(button.toplevel().and_then(|w| w.downcast::<gtk::Window>().ok()).as_ref(), "请先填写 Token", false);
+                show_test_result_dialog(
+                    button
+                        .toplevel()
+                        .and_then(|w| w.downcast::<gtk::Window>().ok())
+                        .as_ref(),
+                    "请先填写 Token",
+                    false,
+                );
                 return;
             }
             button.set_sensitive(false);
@@ -140,7 +160,9 @@ impl SyncTab {
                     if let Some(button) = button_weak.upgrade() {
                         button.set_sensitive(true);
                         button.set_label("测试连接");
-                        let window = button.toplevel().and_then(|w| w.downcast::<gtk::Window>().ok());
+                        let window = button
+                            .toplevel()
+                            .and_then(|w| w.downcast::<gtk::Window>().ok());
                         match result {
                             Ok(msg) => {
                                 show_test_result_dialog(window.as_ref(), &msg, true);
@@ -163,9 +185,24 @@ impl SyncTab {
         let gitee_gist_desc_entry = Self::create_entry("Gist 描述名称");
         gitee_gist_desc_entry.set_text("CopyTimeTrayConfig");
 
-        gitee_box.pack_start(&Self::create_row("API Base:", &gitee_api_entry), false, false, 0);
-        gitee_box.pack_start(&Self::create_row("Token:", &gitee_token_entry), false, false, 0);
-        gitee_box.pack_start(&Self::create_row("Gist 名称:", &gitee_gist_desc_entry), false, false, 0);
+        gitee_box.pack_start(
+            &Self::create_row("API Base:", &gitee_api_entry),
+            false,
+            false,
+            0,
+        );
+        gitee_box.pack_start(
+            &Self::create_row("Token:", &gitee_token_entry),
+            false,
+            false,
+            0,
+        );
+        gitee_box.pack_start(
+            &Self::create_row("Gist 名称:", &gitee_gist_desc_entry),
+            false,
+            false,
+            0,
+        );
 
         // Gitee test connection button
         let gitee_test_button = gtk::Button::with_label("测试连接");
@@ -176,7 +213,14 @@ impl SyncTab {
             let api_base = gitee_api_for_test.text().to_string();
             let token = gitee_token_for_test.text().to_string();
             if api_base.is_empty() || token.is_empty() {
-                show_test_result_dialog(button.toplevel().and_then(|w| w.downcast::<gtk::Window>().ok()).as_ref(), "请先填写 API 地址和 Token", false);
+                show_test_result_dialog(
+                    button
+                        .toplevel()
+                        .and_then(|w| w.downcast::<gtk::Window>().ok())
+                        .as_ref(),
+                    "请先填写 API 地址和 Token",
+                    false,
+                );
                 return;
             }
             button.set_sensitive(false);
@@ -192,7 +236,9 @@ impl SyncTab {
                     if let Some(button) = button_weak.upgrade() {
                         button.set_sensitive(true);
                         button.set_label("测试连接");
-                        let window = button.toplevel().and_then(|w| w.downcast::<gtk::Window>().ok());
+                        let window = button
+                            .toplevel()
+                            .and_then(|w| w.downcast::<gtk::Window>().ok());
                         match result {
                             Ok(msg) => {
                                 show_test_result_dialog(window.as_ref(), &msg, true);
@@ -216,23 +262,23 @@ impl SyncTab {
         let history_expander = gtk::Expander::new(Some("同步历史"));
         history_expander.add(&history_box);
 
-        // Toggle visibility based on provider
-        gitee_box.set_no_show_all(true);
-        gitee_box.hide();
+        // Toggle visibility based on provider. Hidden provider sections must also
+        // use no_show_all=true, otherwise ConfigWindow::show_all() will reveal
+        // them again before the user changes the provider.
+        Self::apply_provider_visibility(
+            &gh_box,
+            &gitee_box,
+            provider_combo.active_text().as_deref(),
+        );
 
         let gitee_clone = gitee_box.clone();
         let gh_clone = gh_box.clone();
         provider_combo.connect_changed(move |combo| {
-            let is_gitee = combo.active_text().as_deref() == Some("gitee");
-            if is_gitee {
-                gitee_clone.set_no_show_all(false);
-                gitee_clone.show_all();
-                gh_clone.hide();
-            } else {
-                gh_clone.set_no_show_all(false);
-                gh_clone.show_all();
-                gitee_clone.hide();
-            }
+            SyncTab::apply_provider_visibility(
+                &gh_clone,
+                &gitee_clone,
+                combo.active_text().as_deref(),
+            );
         });
 
         Self {
@@ -250,6 +296,43 @@ impl SyncTab {
             history_box,
             history_expander,
         }
+    }
+
+    fn provider_visibility(provider: Option<&str>) -> (bool, bool) {
+        let show_gitee = provider == Some("gitee");
+        (!show_gitee, show_gitee)
+    }
+
+    fn apply_provider_visibility(
+        github_box: &gtk::Box,
+        gitee_box: &gtk::Box,
+        provider: Option<&str>,
+    ) {
+        let (show_github, show_gitee) = Self::provider_visibility(provider);
+        if show_github {
+            github_box.set_no_show_all(false);
+            github_box.show_all();
+        } else {
+            github_box.set_no_show_all(true);
+            github_box.hide();
+        }
+
+        if show_gitee {
+            gitee_box.set_no_show_all(false);
+            gitee_box.show_all();
+        } else {
+            gitee_box.set_no_show_all(true);
+            gitee_box.hide();
+        }
+    }
+
+    fn manual_sync_action(_provider: Option<&str>) -> ManualSyncAction {
+        // The config dialog must use the same authoritative sync flow as the
+        // tray menu: pull remote changes into the local tree first, then push
+        // the merged full tree. Keeping a separate per-provider implementation
+        // here previously skipped local merge/gist-id persistence and made the
+        // button appear to do nothing.
+        ManualSyncAction::ManagerPullThenPush
     }
 
     fn create_entry(placeholder: &str) -> gtk::Entry {
@@ -352,7 +435,12 @@ impl ConfigTab for SyncTab {
         container.pack_start(&self.gitee_box, false, false, 0);
 
         // Separator
-        container.pack_start(&gtk::Separator::new(gtk::Orientation::Horizontal), false, false, 8);
+        container.pack_start(
+            &gtk::Separator::new(gtk::Orientation::Horizontal),
+            false,
+            false,
+            8,
+        );
 
         // Manual sync button
         let sync_button = gtk::Button::with_label("立即同步");
@@ -369,7 +457,9 @@ impl ConfigTab for SyncTab {
         sync_button.connect_clicked(move |button| {
             let provider_binding = sync_provider_combo.active_text();
             let provider = provider_binding.as_deref().unwrap_or("github");
-            if provider == "gitee" {
+            let _action = SyncTab::manual_sync_action(Some(provider));
+
+            let sync_config = if provider == "gitee" {
                 let api_base = sync_gitee_api.text().to_string();
                 let token = sync_gitee_token.text().to_string();
                 let gist_desc = sync_gitee_desc.text().to_string();
@@ -380,107 +470,98 @@ impl ConfigTab for SyncTab {
                         .show();
                     return;
                 }
-                button.set_sensitive(false);
-                button.set_label("同步中...");
-                let (sender, receiver) = async_channel::bounded(1);
-                std::thread::spawn(move || {
-                    let sync_config = crate::snippet::config::SyncConfig {
-                        provider: crate::snippet::config::SyncProvider::Gitee,
-                        owner: String::new(),
-                        repo: String::new(),
-                        branch: String::new(),
-                        token: String::new(),
-                        gitee_config: crate::snippet::config::GiteeConfig {
-                            api_base,
-                            token,
-                            auto_sync: true,
-                            sync_interval: 300,
-                            gist_id: None,
-                            gist_description: gist_desc,
-                        },
-                    };
-                    let client = crate::snippet::sync::RealHttpClient::new();
-                    
-                    // First pull from Gitee
-                    let pull_result = crate::snippet::sync::pull(&sync_config, &client);
-                    
-                    // Then push local snippets to Gitee
-                    let push_result = if let Some(manager) = crate::MANAGER.get().and_then(|m| m.lock().ok()) {
-                        let local_snippets: Vec<crate::snippet::model::Snippet> = manager
-                            .with_store(|store| {
-                                store.list()
-                                    .iter()
-                                    .filter(|s| !s.deleted)
-                                    .cloned()
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        
-                        if !local_snippets.is_empty() {
-                            crate::snippet::sync::push(&sync_config, &client, &local_snippets)
-                        } else {
-                            Ok((Vec::new(), None))
-                        }
-                    } else {
-                        Err(crate::snippet::sync::SyncError::Http("Manager not initialized".to_string()))
-                    };
-                    
-                    // Combine results
-                    let result = match (pull_result, push_result) {
-                        (Ok(pull_snippets), Ok(_)) => {
-                            // Re-pull after push to get updated list
-                            crate::snippet::sync::pull(&sync_config, &client)
-                        }
-                        (Ok(pull_snippets), Err(e)) => {
-                            // Pull succeeded but push failed
-                            Ok(pull_snippets)
-                        }
-                        (Err(e), Ok(_)) => {
-                            // Pull failed but push succeeded
-                            Err(e)
-                        }
-                        (Err(e), Err(_)) => {
-                            Err(e)
-                        }
-                    };
-                    
-                    let _ = sender.send_blocking(result);
-                });
-                let button_weak = button.downgrade();
-                let status_weak = sync_status_label.downgrade();
-                glib::spawn_future_local(async move {
-                    while let Ok(result) = receiver.recv().await {
-                        if let Some(button) = button_weak.upgrade() {
-                            button.set_sensitive(true);
-                            button.set_label("立即同步");
-                        }
-                        match result {
-                            Ok(snippets) => {
-                                let count = snippets.len();
-                                let _ = notify_rust::Notification::new()
-                                    .summary("同步成功")
-                                    .body(&format!("已同步 {} 个片段", count))
-                                    .show();
-                                if let Some(label) = status_weak.upgrade() {
-                                    label.set_text(&format!("同步完成：{} 个片段", count));
-                                }
+                let existing_gist_id = Config::load()
+                    .ok()
+                    .and_then(|cfg| cfg.sync)
+                    .and_then(|sync| sync.gitee_config.gist_id);
+                crate::snippet::config::SyncConfig {
+                    provider: crate::snippet::config::SyncProvider::Gitee,
+                    owner: String::new(),
+                    repo: String::new(),
+                    branch: String::new(),
+                    token: String::new(),
+                    gitee_config: crate::snippet::config::GiteeConfig {
+                        api_base,
+                        token,
+                        auto_sync: true,
+                        sync_interval: 300,
+                        gist_id: existing_gist_id,
+                        gist_description: gist_desc,
+                    },
+                }
+            } else {
+                let owner = sync_gh_owner.text().to_string();
+                let repo = sync_gh_repo.text().to_string();
+                let branch = sync_gh_branch.text().to_string();
+                let token = sync_gh_token.text().to_string();
+                if owner.is_empty() || repo.is_empty() || branch.is_empty() || token.is_empty() {
+                    let _ = notify_rust::Notification::new()
+                        .summary("同步失败")
+                        .body("请先填写所有 GitHub 字段")
+                        .show();
+                    return;
+                }
+                crate::snippet::config::SyncConfig {
+                    provider: crate::snippet::config::SyncProvider::Github,
+                    owner,
+                    repo,
+                    branch,
+                    token,
+                    gitee_config: crate::snippet::config::GiteeConfig::default(),
+                }
+            };
+
+            button.set_sensitive(false);
+            button.set_label("同步中...");
+            let (sender, receiver) = async_channel::bounded(1);
+            std::thread::spawn(move || {
+                let result = (|| -> Result<(), String> {
+                    let mut config = Config::load().unwrap_or_default();
+                    config.sync = Some(sync_config);
+                    config.save().map_err(|e| e.to_string())?;
+
+                    let manager_mutex = crate::app::MANAGER
+                        .get()
+                        .ok_or_else(|| "Manager not initialized".to_string())?;
+                    let mut manager = manager_mutex.lock().map_err(|e| e.to_string())?;
+                    manager.reload_config().map_err(|e| e.to_string())?;
+                    manager.do_pull_with_retry()?;
+                    manager.do_push()?;
+                    Ok(())
+                })();
+                let _ = sender.send_blocking(result);
+            });
+
+            let button_weak = button.downgrade();
+            let status_weak = sync_status_label.downgrade();
+            glib::spawn_future_local(async move {
+                while let Ok(result) = receiver.recv().await {
+                    if let Some(button) = button_weak.upgrade() {
+                        button.set_sensitive(true);
+                        button.set_label("立即同步");
+                    }
+                    match result {
+                        Ok(()) => {
+                            let _ = notify_rust::Notification::new()
+                                .summary("同步成功")
+                                .body("已完成拉取、合并并上传")
+                                .show();
+                            if let Some(label) = status_weak.upgrade() {
+                                label.set_text("同步完成");
                             }
-                            Err(e) => {
-                                let _ = notify_rust::Notification::new()
-                                    .summary("同步失败")
-                                    .body(&e.to_string())
-                                    .show();
+                        }
+                        Err(e) => {
+                            let _ = notify_rust::Notification::new()
+                                .summary("同步失败")
+                                .body(&e)
+                                .show();
+                            if let Some(label) = status_weak.upgrade() {
+                                label.set_text(&format!("同步失败：{}", e));
                             }
                         }
                     }
-                });
-            } else {
-                // GitHub sync - similar logic
-                let _ = notify_rust::Notification::new()
-                    .summary("GitHub 同步")
-                    .body("GitHub 同步功能开发中...")
-                    .show();
-            }
+                }
+            });
         });
         container.pack_start(&sync_button, false, false, 0);
 
@@ -540,16 +621,57 @@ impl ConfigTab for SyncTab {
                 }
                 SyncProvider::Gitee => {
                     self.provider_combo.set_active(Some(1));
-                    self.gitee_api_entry.set_text(&sync_config.gitee_config.api_base);
-                    self.gitee_token_entry.set_text(&sync_config.gitee_config.token);
-                    self.gitee_gist_desc_entry.set_text(&sync_config.gitee_config.gist_description);
+                    self.gitee_api_entry
+                        .set_text(&sync_config.gitee_config.api_base);
+                    self.gitee_token_entry
+                        .set_text(&sync_config.gitee_config.token);
+                    self.gitee_gist_desc_entry
+                        .set_text(&sync_config.gitee_config.gist_description);
                 }
             }
         }
+
+        Self::apply_provider_visibility(
+            &self.github_box,
+            &self.gitee_box,
+            self.provider_combo.active_text().as_deref(),
+        );
 
         // Load sync status
         let status = Config::load_sync_status().unwrap_or_default();
         self.update_status_display(&status);
         self.update_history_display(&status.history);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ManualSyncAction, SyncTab};
+
+    #[test]
+    fn test_provider_visibility_defaults_to_github_only() {
+        assert_eq!(SyncTab::provider_visibility(None), (true, false));
+        assert_eq!(SyncTab::provider_visibility(Some("github")), (true, false));
+    }
+
+    #[test]
+    fn test_provider_visibility_gitee_only() {
+        assert_eq!(SyncTab::provider_visibility(Some("gitee")), (false, true));
+    }
+
+    #[test]
+    fn test_manual_sync_button_reuses_manager_flow_for_gitee() {
+        assert_eq!(
+            SyncTab::manual_sync_action(Some("gitee")),
+            ManualSyncAction::ManagerPullThenPush
+        );
+    }
+
+    #[test]
+    fn test_manual_sync_button_reuses_manager_flow_for_github() {
+        assert_eq!(
+            SyncTab::manual_sync_action(Some("github")),
+            ManualSyncAction::ManagerPullThenPush
+        );
     }
 }

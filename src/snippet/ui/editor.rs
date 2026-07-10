@@ -1,13 +1,23 @@
-use eframe::egui;
-use crossbeam_channel::Sender;
 use crate::snippet::model::Snippet;
 use crate::snippet::ui::UiResponse;
+use crossbeam_channel::Sender;
+use eframe::egui;
 
 #[derive(Debug, Clone)]
 pub enum EditorAction {
-    Create { name: String, content: String, parent_id: Option<String> },
-    Update { id: String, name: String, content: String },
-    Delete { id: String },
+    Create {
+        name: String,
+        content: String,
+        parent_id: Option<String>,
+    },
+    Update {
+        id: String,
+        name: String,
+        content: String,
+    },
+    Delete {
+        id: String,
+    },
     Cancel,
 }
 
@@ -96,78 +106,78 @@ impl eframe::App for EditorPopup {
             .resizable(false)
             .default_width(400.0)
             .default_height(300.0)
-            .show(ctx, |ui| {
-                match &self.mode {
-                    EditorMode::DeleteConfirm(snippet) => {
-                        let name = snippet.name.clone();
-                        let id = snippet.id.clone();
-                        ui.label(format!("确定要删除 \"{}\" 吗？", name));
-                        ui.add_space(20.0);
-                        ui.horizontal(|ui| {
-                            if ui.button("取消").clicked() {
-                                self.hide();
+            .show(ctx, |ui| match &self.mode {
+                EditorMode::DeleteConfirm(snippet) => {
+                    let name = snippet.name.clone();
+                    let id = snippet.id.clone();
+                    ui.label(format!("确定要删除 \"{}\" 吗？", name));
+                    ui.add_space(20.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("取消").clicked() {
+                            self.hide();
+                        }
+                        if ui.button("删除").clicked() {
+                            if let Some(ref sender) = self.resp_sender {
+                                let _ = sender.send(UiResponse::SnippetDeleted(id));
                             }
-                            if ui.button("删除").clicked() {
-                                if let Some(ref sender) = self.resp_sender {
-                                    let _ = sender.send(UiResponse::SnippetDeleted(id));
-                                }
-                                self.hide();
-                            }
-                        });
-                    }
-                    _ => {
-                        let is_create = matches!(self.mode, EditorMode::Create);
-                        let edit_snippet = if let EditorMode::Edit(s) = &self.mode {
-                            Some(s.clone())
-                        } else {
-                            None
-                        };
+                            self.hide();
+                        }
+                    });
+                }
+                _ => {
+                    let is_create = matches!(self.mode, EditorMode::Create);
+                    let edit_snippet = if let EditorMode::Edit(s) = &self.mode {
+                        Some(s.clone())
+                    } else {
+                        None
+                    };
 
-                        ui.label("名称:");
-                        ui.text_edit_singleline(&mut self.name);
-                        ui.add_space(4.0);
+                    ui.label("名称:");
+                    ui.text_edit_singleline(&mut self.name);
+                    ui.add_space(4.0);
 
-                        ui.label("文件夹:");
-                        ui.label("(暂不支持选择父文件夹)");
-                        ui.add_space(4.0);
+                    ui.label("文件夹:");
+                    ui.label("(暂不支持选择父文件夹)");
+                    ui.add_space(4.0);
 
-                        ui.label("内容:");
-                        ui.add(egui::TextEdit::multiline(&mut self.content)
+                    ui.label("内容:");
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.content)
                             .desired_rows(6)
-                            .desired_width(f32::INFINITY));
-                        ui.add_space(8.0);
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.add_space(8.0);
 
-                        ui.horizontal(|ui| {
-                            if ui.button("取消").clicked() {
-                                self.hide();
-                            }
-                            if ui.button("保存").clicked() {
-                                if !self.name.is_empty() {
-                                    if let Some(ref sender) = self.resp_sender {
-                                        if is_create {
-                                            let mut snippet = Snippet::new_snippet(
-                                                self.name.clone(),
-                                                self.content.clone(),
-                                                self.selected_parent.clone(),
-                                            );
-                                            snippet.synced = false;
-                                            let _ = sender.send(UiResponse::SnippetCreated(snippet));
-                                        } else if let Some(s) = edit_snippet {
-                                            let mut updated = s;
-                                            updated.name = self.name.clone();
-                                            updated.content = Some(self.content.clone());
-                                            updated.synced = false;
-                                            let _ = sender.send(UiResponse::SnippetUpdated(updated));
-                                        }
+                    ui.horizontal(|ui| {
+                        if ui.button("取消").clicked() {
+                            self.hide();
+                        }
+                        if ui.button("保存").clicked() {
+                            if !self.name.is_empty() {
+                                if let Some(ref sender) = self.resp_sender {
+                                    if is_create {
+                                        let mut snippet = Snippet::new_snippet(
+                                            self.name.clone(),
+                                            self.content.clone(),
+                                            self.selected_parent.clone(),
+                                        );
+                                        snippet.synced = false;
+                                        let _ = sender.send(UiResponse::SnippetCreated(snippet));
+                                    } else if let Some(s) = edit_snippet {
+                                        let mut updated = s;
+                                        updated.name = self.name.clone();
+                                        updated.content = Some(self.content.clone());
+                                        updated.synced = false;
+                                        let _ = sender.send(UiResponse::SnippetUpdated(updated));
                                     }
                                 }
-                                self.hide();
                             }
-                            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                                self.hide();
-                            }
-                        });
-                    }
+                            self.hide();
+                        }
+                        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            self.hide();
+                        }
+                    });
                 }
             });
     }

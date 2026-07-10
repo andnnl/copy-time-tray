@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::snippet::config::{SyncConfig, SyncProvider, GiteeConfig};
+use crate::snippet::config::{GiteeConfig, SyncConfig, SyncProvider};
 use crate::snippet::gitee::types::{Gist, GistCreate, GistFileCreate, GistUpdate};
 use crate::snippet::gitee::GiteeClient;
 use crate::snippet::model::Snippet;
@@ -55,7 +55,7 @@ pub struct TreeEntry {
     pub create_date: DateTime<Utc>,
     pub update_date: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content_file: Option<String>,
+    pub content: Option<String>,
 }
 
 /// Build tree entries from snippets for serialization to tree.json.
@@ -71,12 +71,36 @@ pub fn build_tree_entries(snippets: &[&Snippet]) -> Vec<TreeEntry> {
             deleted: s.deleted,
             create_date: s.create_date,
             update_date: s.update_date,
-            content_file: match s.snippet_type {
-                crate::snippet::model::SnippetType::Snippet => {
-                    Some(format!("{}_{}.txt", s.id, s.name))
-                }
-                crate::snippet::model::SnippetType::Folder => None,
-            },
+            content: s.content.clone(),
+        })
+        .collect()
+}
+
+const GITEE_TOMBSTONE_RETENTION_DAYS: i64 = 30;
+
+fn snippets_for_gitee_tree(snippets: &[Snippet], now: DateTime<Utc>) -> Vec<&Snippet> {
+    let cutoff = now - chrono::Duration::days(GITEE_TOMBSTONE_RETENTION_DAYS);
+    snippets
+        .iter()
+        .filter(|s| !s.deleted || s.update_date >= cutoff)
+        .collect()
+}
+
+fn tree_entries_to_snippets(tree_entries: Vec<TreeEntry>) -> Vec<Snippet> {
+    tree_entries
+        .into_iter()
+        .map(|entry| Snippet {
+            id: entry.id,
+            parent_id: entry.parent_id,
+            name: entry.name,
+            snippet_type: entry.entry_type,
+            content: entry.content,
+            sort: entry.sort,
+            deleted: entry.deleted,
+            synced: true,
+            create_date: entry.create_date,
+            update_date: entry.update_date,
+            gitee_gist_id: None,
         })
         .collect()
 }
@@ -180,10 +204,7 @@ pub fn auth_headers(config: &SyncConfig) -> HashMap<String, String> {
     let mut headers = HashMap::new();
     match config.provider {
         SyncProvider::Github => {
-            headers.insert(
-                "Authorization".into(),
-                format!("Bearer {}", config.token),
-            );
+            headers.insert("Authorization".into(), format!("Bearer {}", config.token));
             headers.insert("Accept".into(), "application/vnd.github+json".into());
         }
         SyncProvider::Gitee => {
@@ -195,12 +216,8 @@ pub fn auth_headers(config: &SyncConfig) -> HashMap<String, String> {
 
 pub fn pull(config: &SyncConfig, client: &dyn HttpClient) -> Result<Vec<Snippet>, SyncError> {
     match config.provider {
-        SyncProvider::Gitee => {
-            pull_from_single_gist(config)
-        }
-        SyncProvider::Github => {
-            pull_github(config, client)
-        }
+        SyncProvider::Gitee => pull_from_single_gist(config),
+        SyncProvider::Github => pull_github(config, client),
     }
 }
 
@@ -216,59 +233,23 @@ fn pull_from_single_gist(config: &SyncConfig) -> Result<Vec<Snippet>, SyncError>
         .get_gist(gist_id)
         .map_err(|e| SyncError::Http(e.to_string()))?;
 
-    let tree_file = gist.files.get("tree.json").ok_or_else(|| {
-        SyncError::Parse("tree.json not found in gist".into())
-    })?;
+    let tree_file = gist
+        .files
+        .get("tree.json")
+        .ok_or_else(|| SyncError::Parse("tree.json not found in gist".into()))?;
 
     let tree_content = tree_file.content.as_deref().unwrap_or("");
     if tree_content.trim().is_empty() {
         return Ok(Vec::new());
     }
 
-    let tree_entries: Vec<TreeEntry> =
-        serde_json::from_str(tree_content).map_err(|e| {
-            SyncError::Parse(format!("Failed to parse tree.json: {}", e))
-        })?;
+    let tree_entries: Vec<TreeEntry> = serde_json::from_str(tree_content)
+        .map_err(|e| SyncError::Parse(format!("Failed to parse tree.json: {}", e)))?;
 
-    let mut snippets = Vec::new();
-    for entry in tree_entries {
-        if entry.deleted {
-            continue;
-        }
-
-        let content = match entry.entry_type {
-            crate::snippet::model::SnippetType::Snippet => {
-                if let Some(ref content_file) = entry.content_file {
-                    gist.files.get(content_file).and_then(|f| f.content.clone())
-                } else {
-                    None
-                }
-            }
-            crate::snippet::model::SnippetType::Folder => None,
-        };
-
-        snippets.push(Snippet {
-            id: entry.id,
-            parent_id: entry.parent_id,
-            name: entry.name,
-            snippet_type: entry.entry_type,
-            content,
-            sort: entry.sort,
-            deleted: entry.deleted,
-            synced: true,
-            create_date: entry.create_date,
-            update_date: entry.update_date,
-            gitee_gist_id: None,
-        });
-    }
-
-    Ok(snippets)
+    Ok(tree_entries_to_snippets(tree_entries))
 }
 
-fn pull_github(
-    config: &SyncConfig,
-    client: &dyn HttpClient,
-) -> Result<Vec<Snippet>, SyncError> {
+fn pull_github(config: &SyncConfig, client: &dyn HttpClient) -> Result<Vec<Snippet>, SyncError> {
     let base = base_url(config);
     let headers = auth_headers(config);
 
@@ -303,11 +284,7 @@ fn pull_github(
         }
         let content_resp = client.get(&content_url, &content_headers)?;
         if content_resp.status != 200 {
-            log::warn!(
-                "Failed to fetch {}: {}",
-                entry.path,
-                content_resp.status
-            );
+            log::warn!("Failed to fetch {}: {}", entry.path, content_resp.status);
             continue;
         }
 
@@ -329,8 +306,8 @@ fn parse_yaml_snippet(relative_path: &str, body: &str) -> Result<Snippet, SyncEr
         updated: String,
     }
 
-    let remote: RemoteSnippet =
-        serde_yaml::from_str(body).map_err(|e| SyncError::Parse(format!("YAML parse failed: {}", e)))?;
+    let remote: RemoteSnippet = serde_yaml::from_str(body)
+        .map_err(|e| SyncError::Parse(format!("YAML parse failed: {}", e)))?;
 
     let create_date = chrono::DateTime::parse_from_rfc3339(&remote.created)
         .map_err(|e| SyncError::Parse(format!("Invalid created date: {}", e)))?
@@ -376,57 +353,62 @@ pub fn push(
             let gist_id = push_to_single_gist(config, snippets)?;
             Ok((Vec::new(), Some(gist_id)))
         }
-        SyncProvider::Github => {
-            push_github(config, client, snippets).map(|failed| (failed, None))
-        }
+        SyncProvider::Github => push_github(config, client, snippets).map(|failed| (failed, None)),
     }
 }
 
+fn find_reusable_gitee_config_gist_id(gists: &[Gist], description: &str) -> Option<String> {
+    gists
+        .iter()
+        .filter(|gist| gist.description.as_deref() == Some(description))
+        .filter(|gist| gist.files.contains_key("tree.json"))
+        .max_by_key(|gist| gist.updated_at)
+        .map(|gist| gist.id.clone())
+}
+
 /// Push all snippets to a single Gitee gist with tree.json + content files.
-fn push_to_single_gist(
-    config: &SyncConfig,
-    snippets: &[Snippet],
-) -> Result<String, SyncError> {
+fn push_to_single_gist(config: &SyncConfig, snippets: &[Snippet]) -> Result<String, SyncError> {
     let gitee_config = &config.gitee_config;
-    let active: Vec<&Snippet> = snippets.iter().filter(|s| !s.deleted).collect();
+    let active = snippets_for_gitee_tree(snippets, Utc::now());
 
-    eprintln!("[DEBUG] push_to_single_gist: {} active snippets", active.len());
-
-    if active.is_empty() {
-        return Ok(String::new());
-    }
+    eprintln!(
+        "[DEBUG] push_to_single_gist: {} snippets after tombstone retention",
+        active.len()
+    );
 
     let tree_entries = build_tree_entries(&active);
-    let tree_json = serde_json::to_string_pretty(&tree_entries)
-        .map_err(|e| SyncError::Store(e.to_string()))?;
+    let tree_json =
+        serde_json::to_string_pretty(&tree_entries).map_err(|e| SyncError::Store(e.to_string()))?;
 
-    let mut files: HashMap<String, String> = HashMap::new();
-    files.insert("tree.json".into(), tree_json);
-    for s in &active {
-        if let Some(ref content) = s.content {
-            let filename = format!("{}_{}.txt", s.id, s.name);
-            eprintln!("[DEBUG] push_to_single_gist: adding file {} ({} bytes)", filename, content.len());
-            files.insert(filename, content.clone());
-        }
-    }
-
-    eprintln!("[DEBUG] push_to_single_gist: {} files to upload", files.len());
+    eprintln!(
+        "[DEBUG] push_to_single_gist: tree.json size {} bytes",
+        tree_json.len()
+    );
 
     let gist_id = match &gitee_config.gist_id {
         Some(id) => {
             let gitee_client = GiteeClient::new(gitee_config.clone());
             match gitee_client.get_gist(id) {
                 Ok(_) => id.clone(),
-                Err(_) => create_new_gist(gitee_config, &files)?,
+                Err(_) => {
+                    let mut files: HashMap<String, String> = HashMap::new();
+                    files.insert("tree.json".into(), tree_json.clone());
+                    create_new_gist(gitee_config, &files)?
+                }
             }
         }
-        None => create_new_gist(gitee_config, &files)?,
+        None => {
+            if active.is_empty() {
+                return Ok(String::new());
+            }
+            let mut files: HashMap<String, String> = HashMap::new();
+            files.insert("tree.json".into(), tree_json.clone());
+            create_new_gist(gitee_config, &files)?
+        }
     };
 
     let mut update = GistUpdate::new(Some(&gitee_config.gist_description));
-    for (filename, content) in &files {
-        update = update.add_file(filename, content);
-    }
+    update = update.add_file("tree.json", &tree_json);
 
     let gitee_client = GiteeClient::new(gitee_config.clone());
     gitee_client
@@ -440,6 +422,19 @@ fn create_new_gist(
     gitee_config: &GiteeConfig,
     files: &HashMap<String, String>,
 ) -> Result<String, SyncError> {
+    let gitee_client = GiteeClient::new(gitee_config.clone());
+    if let Ok(gists) = gitee_client.list_gists() {
+        if let Some(existing_id) =
+            find_reusable_gitee_config_gist_id(&gists, &gitee_config.gist_description)
+        {
+            eprintln!(
+                "[SYNC] Reusing existing Gitee gist {} for description {}",
+                existing_id, gitee_config.gist_description
+            );
+            return Ok(existing_id);
+        }
+    }
+
     let mut gist_files = HashMap::new();
     for (name, content) in files {
         gist_files.insert(name.clone(), GistFileCreate::new(Some(content)));
@@ -451,7 +446,6 @@ fn create_new_gist(
         public: false,
     };
 
-    let gitee_client = GiteeClient::new(gitee_config.clone());
     let gist = gitee_client
         .create_gist(&create)
         .map_err(|e| SyncError::Http(e.to_string()))?;
@@ -582,13 +576,18 @@ mod tests {
     struct MockHttpClient;
 
     impl HttpClient for MockHttpClient {
-        fn get(&self, url: &str, _headers: &HashMap<String, String>) -> Result<HttpResponse, SyncError> {
+        fn get(
+            &self,
+            url: &str,
+            _headers: &HashMap<String, String>,
+        ) -> Result<HttpResponse, SyncError> {
             MOCK_REQUESTS.with(|r| r.lock().unwrap().push(("GET".into(), url.into())));
             if url.contains("git/trees") {
                 Ok(HttpResponse {
                     status: 200,
-                    body: r#"{"tree":[{"path":"snippets/test.yaml","type":"blob","sha":"abc123"}]}"#
-                        .into(),
+                    body:
+                        r#"{"tree":[{"path":"snippets/test.yaml","type":"blob","sha":"abc123"}]}"#
+                            .into(),
                 })
             } else if url.contains("contents/snippets/test.yaml") {
                 Ok(HttpResponse {
@@ -658,10 +657,7 @@ mod tests {
             gitee_config: GiteeConfig::default(),
         };
         let url = base_url(&config);
-        assert_eq!(
-            url,
-            "https://gitee.com/api/v5/repos/giteeuser/gitee-repo"
-        );
+        assert_eq!(url, "https://gitee.com/api/v5/repos/giteeuser/gitee-repo");
     }
 
     #[test]
@@ -748,16 +744,19 @@ mod tests {
             deleted: false,
             create_date: chrono::Utc::now(),
             update_date: chrono::Utc::now(),
-            content_file: None,
+            content: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("\"id\":\"uuid-1\""));
         assert!(json.contains("\"type\":\"folder\""));
-        assert!(!json.contains("\"content_file\""), "content_file should be absent for folder");
+        assert!(
+            !json.contains("\"content\""),
+            "content should be absent for folder"
+        );
     }
 
     #[test]
-    fn test_tree_entry_snippet_has_content_file() {
+    fn test_tree_entry_snippet_has_content() {
         use crate::snippet::model::SnippetType;
         let entry = TreeEntry {
             id: "uuid-2".into(),
@@ -768,33 +767,129 @@ mod tests {
             deleted: false,
             create_date: chrono::Utc::now(),
             update_date: chrono::Utc::now(),
-            content_file: Some("uuid-2_ping.txt".into()),
+            content: Some("echo ping".into()),
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("\"type\":\"snippet\""));
-        assert!(json.contains("\"content_file\":\"uuid-2_ping.txt\""));
+        assert!(json.contains("\"content\":\"echo ping\""));
     }
 
     #[test]
-    fn test_build_tree_entries_includes_folders_and_snippets() {
+    fn test_build_tree_entries_includes_content() {
         let folder = Snippet::new_folder("网络工具".into(), None);
-        let snippet = Snippet::new_snippet("ping".into(), "echo ping".into(), Some(folder.id.clone()));
+        let snippet =
+            Snippet::new_snippet("ping".into(), "echo ping".into(), Some(folder.id.clone()));
 
         let entries = build_tree_entries(&[&folder, &snippet]);
         assert_eq!(entries.len(), 2);
-        
-        let snip_entry = entries.iter().find(|e| e.entry_type == crate::snippet::model::SnippetType::Snippet).unwrap();
-        assert!(snip_entry.content_file.is_some());
-        assert!(snip_entry.content_file.as_ref().unwrap().ends_with("_ping.txt"));
+
+        let snip_entry = entries
+            .iter()
+            .find(|e| e.entry_type == crate::snippet::model::SnippetType::Snippet)
+            .unwrap();
+        assert_eq!(snip_entry.content, Some("echo ping".into()));
+    }
+
+    #[test]
+    fn test_find_reusable_gitee_config_gist_prefers_existing_tree_json_gist() {
+        let older = Gist {
+            id: "older".into(),
+            description: Some("CopyTimeTrayConfig".into()),
+            files: HashMap::from([(
+                "tree.json".into(),
+                crate::snippet::gitee::types::GistFile {
+                    filename: Some("tree.json".into()),
+                    content: None,
+                    raw_url: None,
+                },
+            )]),
+            created_at: "2026-01-01T00:00:00Z".parse().unwrap(),
+            updated_at: "2026-01-01T00:00:00Z".parse().unwrap(),
+        };
+        let newer = Gist {
+            id: "newer".into(),
+            description: Some("CopyTimeTrayConfig".into()),
+            files: HashMap::from([(
+                "tree.json".into(),
+                crate::snippet::gitee::types::GistFile {
+                    filename: Some("tree.json".into()),
+                    content: None,
+                    raw_url: None,
+                },
+            )]),
+            created_at: "2026-01-01T00:00:00Z".parse().unwrap(),
+            updated_at: "2026-01-02T00:00:00Z".parse().unwrap(),
+        };
+        let old_layout = Gist {
+            id: "old-layout".into(),
+            description: Some("CopyTimeTrayConfig".into()),
+            files: HashMap::new(),
+            created_at: "2026-01-03T00:00:00Z".parse().unwrap(),
+            updated_at: "2026-01-03T00:00:00Z".parse().unwrap(),
+        };
+
+        let reusable =
+            find_reusable_gitee_config_gist_id(&[older, newer, old_layout], "CopyTimeTrayConfig");
+
+        assert_eq!(reusable, Some("newer".into()));
+    }
+
+    #[test]
+    fn test_gitee_tree_keeps_recent_deleted_tombstones_for_30_days() {
+        let now = chrono::Utc::now();
+        let mut active = Snippet::new_snippet("active".into(), "active content".into(), None);
+        active.id = "active".into();
+
+        let mut recent_deleted =
+            Snippet::new_snippet("recent deleted".into(), "deleted content".into(), None);
+        recent_deleted.id = "recent-deleted".into();
+        recent_deleted.deleted = true;
+        recent_deleted.update_date = now - chrono::Duration::days(29);
+
+        let mut expired_deleted =
+            Snippet::new_snippet("expired deleted".into(), "old deleted content".into(), None);
+        expired_deleted.id = "expired-deleted".into();
+        expired_deleted.deleted = true;
+        expired_deleted.update_date = now - chrono::Duration::days(31);
+
+        let snippets = vec![active, recent_deleted, expired_deleted];
+        let kept = snippets_for_gitee_tree(&snippets, now);
+
+        let kept_ids: Vec<&str> = kept.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(kept_ids, vec!["active", "recent-deleted"]);
+    }
+
+    #[test]
+    fn test_tree_entries_to_snippets_preserves_deleted_tombstones() {
+        use crate::snippet::model::SnippetType;
+        let deleted_at = chrono::Utc::now();
+        let entries = vec![TreeEntry {
+            id: "deleted-id".into(),
+            parent_id: None,
+            name: "deleted remote".into(),
+            entry_type: SnippetType::Snippet,
+            sort: 0,
+            deleted: true,
+            create_date: deleted_at - chrono::Duration::days(1),
+            update_date: deleted_at,
+            content: Some("old content".into()),
+        }];
+
+        let snippets = tree_entries_to_snippets(entries);
+
+        assert_eq!(snippets.len(), 1);
+        assert_eq!(snippets[0].id, "deleted-id");
+        assert!(snippets[0].deleted);
+        assert!(snippets[0].synced);
     }
 
     #[test]
     fn test_pull_from_single_gist_reconstructs_snippets() {
-        let tree_content = "[{\"id\":\"f1\",\"parent_id\":null,\"name\":\"网络工具\",\"type\":\"folder\",\"sort\":0,\"deleted\":false,\"create_date\":\"2026-01-01T00:00:00Z\",\"update_date\":\"2026-01-01T00:00:00Z\"},{\"id\":\"s1\",\"parent_id\":\"f1\",\"name\":\"ping\",\"type\":\"snippet\",\"sort\":0,\"deleted\":false,\"create_date\":\"2026-01-01T00:00:00Z\",\"update_date\":\"2026-01-02T00:00:00Z\",\"content_file\":\"s1_ping.txt\"}]";
+        let tree_content = "[{\"id\":\"f1\",\"parent_id\":null,\"name\":\"网络工具\",\"type\":\"folder\",\"sort\":0,\"deleted\":false,\"create_date\":\"2026-01-01T00:00:00Z\",\"update_date\":\"2026-01-01T00:00:00Z\"},{\"id\":\"s1\",\"parent_id\":\"f1\",\"name\":\"ping\",\"type\":\"snippet\",\"sort\":0,\"deleted\":false,\"create_date\":\"2026-01-01T00:00:00Z\",\"update_date\":\"2026-01-02T00:00:00Z\",\"content\":\"echo ping\"}]";
         let entries: Vec<TreeEntry> = serde_json::from_str(tree_content).unwrap();
         assert_eq!(entries.len(), 2);
         let snip = entries.iter().find(|e| e.id == "s1").unwrap();
-        assert_eq!(snip.content_file, Some("s1_ping.txt".into()));
+        assert_eq!(snip.content, Some("echo ping".into()));
         assert_eq!(snip.parent_id, Some("f1".into()));
     }
 }

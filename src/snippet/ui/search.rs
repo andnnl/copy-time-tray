@@ -1,8 +1,8 @@
-use eframe::egui;
-use crossbeam_channel::{Sender, Receiver, TryRecvError};
 use crate::snippet::model::Snippet;
-use crate::snippet::ui::{UiCommand, UiResponse};
 use crate::snippet::ui::editor::EditorPopup;
+use crate::snippet::ui::{UiCommand, UiResponse};
+use crossbeam_channel::{Receiver, Sender, TryRecvError};
+use eframe::egui;
 
 pub struct SearchPopup {
     search_query: String,
@@ -49,10 +49,15 @@ impl SearchPopup {
             self.filtered = self.snippets.clone();
         } else {
             let query = self.search_query.to_lowercase();
-            self.filtered = self.snippets.iter()
+            self.filtered = self
+                .snippets
+                .iter()
                 .filter(|s| {
                     s.name.to_lowercase().contains(&query)
-                        || s.content.as_ref().map(|c| c.to_lowercase().contains(&query)).unwrap_or(false)
+                        || s.content
+                            .as_ref()
+                            .map(|c| c.to_lowercase().contains(&query))
+                            .unwrap_or(false)
                 })
                 .cloned()
                 .collect();
@@ -66,8 +71,12 @@ impl SearchPopup {
         if let Some(rx) = self.cmd_receiver.take() {
             loop {
                 match rx.try_recv() {
-                    Ok(UiCommand::Show) => { self.visible = true; }
-                    Ok(UiCommand::Hide) => { self.visible = false; }
+                    Ok(UiCommand::Show) => {
+                        self.visible = true;
+                    }
+                    Ok(UiCommand::Hide) => {
+                        self.visible = false;
+                    }
                     Ok(UiCommand::RefreshSnippets(snippets)) => {
                         self.snippets = snippets;
                         self.filter_snippets();
@@ -111,7 +120,10 @@ impl eframe::App for SearchPopup {
 
                 if ui.input(|i| i.key_pressed(egui::Key::E) && i.modifiers.ctrl) {
                     if let Some(snippet) = self.filtered.get(self.selected_index) {
-                        if matches!(snippet.snippet_type, crate::snippet::model::SnippetType::Snippet) {
+                        if matches!(
+                            snippet.snippet_type,
+                            crate::snippet::model::SnippetType::Snippet
+                        ) {
                             self.editor.show_edit(snippet.clone());
                         }
                     }
@@ -119,7 +131,10 @@ impl eframe::App for SearchPopup {
 
                 if ui.input(|i| i.key_pressed(egui::Key::D) && i.modifiers.ctrl) {
                     if let Some(snippet) = self.filtered.get(self.selected_index) {
-                        if matches!(snippet.snippet_type, crate::snippet::model::SnippetType::Snippet) {
+                        if matches!(
+                            snippet.snippet_type,
+                            crate::snippet::model::SnippetType::Snippet
+                        ) {
                             self.editor.show_delete(snippet.clone());
                         }
                     }
@@ -128,8 +143,8 @@ impl eframe::App for SearchPopup {
                 ui.horizontal(|ui| {
                     ui.label("🔍");
                     if ui.text_edit_singleline(&mut self.search_query).lost_focus()
-                        && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    }
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    {}
                 });
 
                 if self.search_query != self.last_query {
@@ -147,7 +162,9 @@ impl eframe::App for SearchPopup {
                             crate::snippet::model::SnippetType::Folder => "📁",
                             crate::snippet::model::SnippetType::Snippet => "📄",
                         };
-                        let content_preview = snippet.content.as_deref()
+                        let content_preview = snippet
+                            .content
+                            .as_deref()
                             .unwrap_or("")
                             .chars()
                             .take(30)
@@ -159,23 +176,31 @@ impl eframe::App for SearchPopup {
                             ui.visuals().widgets.noninteractive.weak_bg_fill
                         };
 
-                        ui.painter().rect_filled(
-                            ui.available_rect_before_wrap(),
-                            2.0,
-                            bg,
-                        );
+                        ui.painter()
+                            .rect_filled(ui.available_rect_before_wrap(), 2.0, bg);
 
                         ui.colored_label(
-                            if is_selected { ui.visuals().selection.stroke.color } else { ui.visuals().widgets.noninteractive.fg_stroke.color },
+                            if is_selected {
+                                ui.visuals().selection.stroke.color
+                            } else {
+                                ui.visuals().widgets.noninteractive.fg_stroke.color
+                            },
                             format!("{} {}", prefix, snippet.name),
                         );
 
                         if !content_preview.is_empty() {
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(egui::RichText::new(&content_preview).color(
-                                    ui.visuals().widgets.noninteractive.fg_stroke.color
-                                ).small());
-                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        egui::RichText::new(&content_preview)
+                                            .color(
+                                                ui.visuals().widgets.noninteractive.fg_stroke.color,
+                                            )
+                                            .small(),
+                                    );
+                                },
+                            );
                         }
 
                         if is_selected && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -192,7 +217,9 @@ impl eframe::App for SearchPopup {
                             }
                         }
 
-                        if is_selected && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.ctrl) {
+                        if is_selected
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.ctrl)
+                        {
                             if let Some(ref content) = snippet.content {
                                 copy_index = Some(content.clone());
                             }
@@ -212,7 +239,9 @@ impl eframe::App for SearchPopup {
                     self.selected_index -= 1;
                 }
 
-                if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) && self.selected_index + 1 < self.filtered.len() {
+                if ui.input(|i| i.key_pressed(egui::Key::ArrowDown))
+                    && self.selected_index + 1 < self.filtered.len()
+                {
                     self.selected_index += 1;
                 }
 

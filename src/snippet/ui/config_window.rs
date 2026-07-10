@@ -1,6 +1,6 @@
+use super::tabs::{about_tab, general_tab, sync_tab, ConfigTab};
+use crate::snippet::config::{Config, GiteeConfig, SyncConfig, SyncProvider};
 use gtk::prelude::*;
-use crate::snippet::config::{Config, SyncConfig, SyncProvider, GiteeConfig};
-use super::tabs::{ConfigTab, sync_tab, general_tab, about_tab};
 
 pub struct ConfigWindow {
     window: gtk::Dialog,
@@ -25,6 +25,7 @@ impl ConfigWindow {
         );
         window.set_default_size(450, 500);
         window.set_resizable(true);
+        window.set_position(gtk::WindowPosition::Center);
 
         let notebook = gtk::Notebook::new();
 
@@ -39,7 +40,10 @@ impl ConfigWindow {
         sync_container.set_margin_start(12);
         sync_container.set_margin_end(12);
         sync_tab.build(&sync_container);
-        notebook.append_page(&sync_container, Some(&gtk::Label::new(Some(sync_tab.title()))));
+        notebook.append_page(
+            &sync_container,
+            Some(&gtk::Label::new(Some(sync_tab.title()))),
+        );
 
         let general_container = gtk::Box::new(gtk::Orientation::Vertical, 8);
         general_container.set_margin_top(12);
@@ -47,7 +51,10 @@ impl ConfigWindow {
         general_container.set_margin_start(12);
         general_container.set_margin_end(12);
         general_tab.build(&general_container);
-        notebook.append_page(&general_container, Some(&gtk::Label::new(Some(general_tab.title()))));
+        notebook.append_page(
+            &general_container,
+            Some(&gtk::Label::new(Some(general_tab.title()))),
+        );
 
         let about_container = gtk::Box::new(gtk::Orientation::Vertical, 8);
         about_container.set_margin_top(12);
@@ -55,7 +62,10 @@ impl ConfigWindow {
         about_container.set_margin_start(12);
         about_container.set_margin_end(12);
         about_tab.build(&about_container);
-        notebook.append_page(&about_container, Some(&gtk::Label::new(Some(about_tab.title()))));
+        notebook.append_page(
+            &about_container,
+            Some(&gtk::Label::new(Some(about_tab.title()))),
+        );
 
         let content = window.content_area();
         content.pack_start(&notebook, true, true, 0);
@@ -72,6 +82,33 @@ impl ConfigWindow {
             general_tab,
             about_tab,
         }
+    }
+
+    fn build_sync_config_from_dialog(dialog: &ConfigWindow) -> Option<SyncConfig> {
+        let existing_gitee_config = Config::load()
+            .ok()
+            .and_then(|cfg| cfg.sync)
+            .map(|sync| sync.gitee_config)
+            .unwrap_or_default();
+
+        Some(SyncConfig {
+            provider: match dialog.sync_tab.provider_combo.active_text().as_deref() {
+                Some("gitee") => SyncProvider::Gitee,
+                _ => SyncProvider::Github,
+            },
+            owner: dialog.sync_tab.owner_entry.text().to_string(),
+            repo: dialog.sync_tab.repo_entry.text().to_string(),
+            branch: dialog.sync_tab.branch_entry.text().to_string(),
+            token: dialog.sync_tab.gh_token_entry.text().to_string(),
+            gitee_config: GiteeConfig {
+                api_base: dialog.sync_tab.gitee_api_entry.text().to_string(),
+                token: dialog.sync_tab.gitee_token_entry.text().to_string(),
+                auto_sync: existing_gitee_config.auto_sync,
+                sync_interval: existing_gitee_config.sync_interval,
+                gist_id: existing_gitee_config.gist_id,
+                gist_description: dialog.sync_tab.gitee_gist_desc_entry.text().to_string(),
+            },
+        })
     }
 
     pub fn show(parent: Option<&gtk::Window>) -> Option<Config> {
@@ -92,30 +129,17 @@ impl ConfigWindow {
                 return None;
             }
 
-            // Build config from tab values
-            let sync_config = Some(SyncConfig {
-                provider: match dialog.sync_tab.provider_combo.active_text().as_deref() {
-                    Some("gitee") => SyncProvider::Gitee,
-                    _ => SyncProvider::Github,
-                },
-                owner: dialog.sync_tab.owner_entry.text().to_string(),
-                repo: dialog.sync_tab.repo_entry.text().to_string(),
-                branch: dialog.sync_tab.branch_entry.text().to_string(),
-                token: dialog.sync_tab.gh_token_entry.text().to_string(),
-                gitee_config: GiteeConfig {
-                    api_base: dialog.sync_tab.gitee_api_entry.text().to_string(),
-                    token: dialog.sync_tab.gitee_token_entry.text().to_string(),
-                    auto_sync: true,
-                    sync_interval: 300,
-                    gist_id: None,
-                    gist_description: dialog.sync_tab.gitee_gist_desc_entry.text().to_string(),
-                },
-            });
+            let sync_config = Self::build_sync_config_from_dialog(&dialog);
 
             let general_config = crate::snippet::config::GeneralConfig {
                 auto_sync: dialog.general_tab.auto_sync_switch.is_active(),
-                sync_interval: dialog.general_tab.sync_interval_entry.text().to_string()
-                    .parse().unwrap_or(300),
+                sync_interval: dialog
+                    .general_tab
+                    .sync_interval_entry
+                    .text()
+                    .to_string()
+                    .parse()
+                    .unwrap_or(300),
                 notify_on_success: dialog.general_tab.notify_success_switch.is_active(),
                 notify_on_failure: dialog.general_tab.notify_failure_switch.is_active(),
                 notify_on_create: dialog.general_tab.notify_create_switch.is_active(),
@@ -140,6 +164,7 @@ fn show_error_dialog(parent: Option<&gtk::Window>, message: &str) {
         &[("确定", gtk::ResponseType::Ok)],
     );
     dialog.set_default_size(300, -1);
+    dialog.set_position(gtk::WindowPosition::Center);
 
     let content = dialog.content_area();
     let label = gtk::Label::new(Some(message));

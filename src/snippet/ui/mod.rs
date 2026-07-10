@@ -1,12 +1,14 @@
-use crossbeam_channel::Sender;
 use crate::snippet::model::Snippet;
+use crossbeam_channel::Sender;
 
-pub mod search;
-pub mod editor;
 #[cfg(target_os = "linux")]
 pub mod config_dialog;
 #[cfg(target_os = "linux")]
 pub mod config_window;
+pub mod editor;
+#[cfg(target_os = "linux")]
+pub mod linux_manager;
+pub mod search;
 pub mod tabs;
 
 #[derive(Debug, Clone)]

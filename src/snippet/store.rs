@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-use crate::snippet::model::Snippet;
+use crate::snippet::model::{Snippet, SnippetType};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SnippetFile {
@@ -48,6 +48,13 @@ pub struct SnippetStore {
     data: SnippetFile,
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ImportSummary {
+    pub added: usize,
+    pub skipped_existing_id: usize,
+    pub skipped_duplicate: usize,
+}
+
 impl SnippetStore {
     pub fn new(file_path: PathBuf) -> Result<Self, StoreError> {
         if file_path.exists() {
@@ -91,6 +98,50 @@ impl SnippetStore {
         self.save()
     }
 
+    pub fn import_batch(&mut self, snippets: Vec<Snippet>) -> Result<ImportSummary, StoreError> {
+        use std::collections::HashSet;
+
+        let mut ids: HashSet<String> = self.data.snippets.iter().map(|s| s.id.clone()).collect();
+        let mut names: HashSet<(String, SnippetType, Option<String>)> = self
+            .data
+            .snippets
+            .iter()
+            .filter(|s| !s.deleted)
+            .map(|s| (s.name.clone(), s.snippet_type.clone(), s.parent_id.clone()))
+            .collect();
+        let mut summary = ImportSummary::default();
+
+        for snippet in snippets {
+            if ids.contains(&snippet.id) {
+                summary.skipped_existing_id += 1;
+                continue;
+            }
+
+            let duplicate_key = (
+                snippet.name.clone(),
+                snippet.snippet_type.clone(),
+                snippet.parent_id.clone(),
+            );
+            if !snippet.deleted && names.contains(&duplicate_key) {
+                summary.skipped_duplicate += 1;
+                continue;
+            }
+
+            ids.insert(snippet.id.clone());
+            if !snippet.deleted {
+                names.insert(duplicate_key);
+            }
+            self.data.snippets.push(snippet);
+            summary.added += 1;
+        }
+
+        if summary.added > 0 {
+            self.save()?;
+        }
+
+        Ok(summary)
+    }
+
     pub fn get(&self, id: &str) -> Option<&Snippet> {
         self.data.snippets.iter().find(|s| s.id == id)
     }
@@ -99,11 +150,7 @@ impl SnippetStore {
         self.data.snippets.iter_mut().find(|s| s.id == id)
     }
 
-    pub fn update(
-        &mut self,
-        id: &str,
-        f: impl FnOnce(&mut Snippet),
-    ) -> Result<(), StoreError> {
+    pub fn update(&mut self, id: &str, f: impl FnOnce(&mut Snippet)) -> Result<(), StoreError> {
         if let Some(snippet) = self.get_mut(id) {
             f(snippet);
             snippet.update_date = chrono::Utc::now();
@@ -131,10 +178,23 @@ impl SnippetStore {
         self.data.snippets.iter().filter(|s| !s.synced).collect()
     }
 
+    pub fn mark_synced(&mut self, ids: &[String]) -> Result<(), StoreError> {
+        for id in ids {
+            if let Some(snippet) = self.get_mut(id) {
+                snippet.synced = true;
+            }
+        }
+        self.save()
+    }
+
     pub fn load_from_sync(&mut self, remote_snippets: Vec<Snippet>) -> Result<(), StoreError> {
         use std::collections::HashMap;
 
-        let by_id: HashMap<String, usize> = self.data.snippets.iter().enumerate()
+        let by_id: HashMap<String, usize> = self
+            .data
+            .snippets
+            .iter()
+            .enumerate()
             .map(|(i, s)| (s.id.clone(), i))
             .collect();
 
@@ -170,14 +230,20 @@ mod tests {
             return;
         }
         let content = fs::read_to_string(&path).expect("read file");
-        eprintln!("Content (first 200): {}", &content[..content.len().min(200)]);
-        
+        eprintln!(
+            "Content (first 200): {}",
+            &content[..content.len().min(200)]
+        );
+
         let result: Result<SnippetFile, _> = serde_json::from_str(&content);
         match result {
             Ok(file) => {
                 eprintln!("Parsed OK: {} snippets", file.snippets.len());
                 for (i, s) in file.snippets.iter().enumerate() {
-                    eprintln!("  [{}] name='{}' type={:?} deleted={}", i, s.name, s.snippet_type, s.deleted);
+                    eprintln!(
+                        "  [{}] name='{}' type={:?} deleted={}",
+                        i, s.name, s.snippet_type, s.deleted
+                    );
                 }
             }
             Err(e) => {
@@ -298,6 +364,124 @@ mod tests {
     }
 
     #[test]
+    fn test_mark_synced_preserves_update_date_and_sets_synced_true() {
+        let (mut store, _dir) = temp_store();
+        let mut snippet = Snippet::new_snippet("test".into(), "content".into(), None);
+        snippet.id = "s1".into();
+        snippet.synced = false;
+        snippet.update_date = chrono::Utc::now() - chrono::Duration::minutes(30);
+        let original_update_date = snippet.update_date;
+        store.add(snippet).unwrap();
+
+        store.mark_synced(&["s1".to_string()]).unwrap();
+
+        let updated = store.get("s1").unwrap();
+        assert!(updated.synced);
+        assert_eq!(updated.update_date, original_update_date);
+    }
+
+    #[test]
+    fn test_load_from_sync_merges_whole_tree_by_item_update_date() {
+        let (mut store, _dir) = temp_store();
+        let base = chrono::Utc::now() - chrono::Duration::hours(1);
+
+        let mut local_newer = Snippet::new_snippet("local-newer".into(), "local wins".into(), None);
+        local_newer.id = "same-local-newer".into();
+        local_newer.update_date = base + chrono::Duration::minutes(20);
+        store.add(local_newer).unwrap();
+
+        let mut remote_newer_local =
+            Snippet::new_snippet("remote-newer".into(), "old local".into(), None);
+        remote_newer_local.id = "same-remote-newer".into();
+        remote_newer_local.update_date = base + chrono::Duration::minutes(10);
+        store.add(remote_newer_local).unwrap();
+
+        let mut remote_older =
+            Snippet::new_snippet("local-newer".into(), "remote loses".into(), None);
+        remote_older.id = "same-local-newer".into();
+        remote_older.update_date = base + chrono::Duration::minutes(5);
+        remote_older.synced = true;
+
+        let mut remote_newer =
+            Snippet::new_snippet("remote-newer".into(), "remote wins".into(), None);
+        remote_newer.id = "same-remote-newer".into();
+        remote_newer.update_date = base + chrono::Duration::minutes(30);
+        remote_newer.synced = true;
+
+        let mut remote_only = Snippet::new_snippet("remote-only".into(), "new remote".into(), None);
+        remote_only.id = "remote-only".into();
+        remote_only.update_date = base + chrono::Duration::minutes(40);
+        remote_only.synced = true;
+
+        store
+            .load_from_sync(vec![remote_older, remote_newer, remote_only])
+            .unwrap();
+
+        assert_eq!(
+            store.get("same-local-newer").unwrap().content,
+            Some("local wins".into())
+        );
+        assert_eq!(
+            store.get("same-remote-newer").unwrap().content,
+            Some("remote wins".into())
+        );
+        assert_eq!(
+            store.get("remote-only").unwrap().content,
+            Some("new remote".into())
+        );
+    }
+
+    #[test]
+    fn test_load_from_sync_remote_newer_deleted_tombstone_deletes_local() {
+        let (mut store, _dir) = temp_store();
+        let base = chrono::Utc::now() - chrono::Duration::hours(1);
+
+        let mut local = Snippet::new_snippet("local active".into(), "local content".into(), None);
+        local.id = "same-id".into();
+        local.deleted = false;
+        local.update_date = base;
+        store.add(local).unwrap();
+
+        let mut remote =
+            Snippet::new_snippet("remote deleted".into(), "remote content".into(), None);
+        remote.id = "same-id".into();
+        remote.deleted = true;
+        remote.update_date = base + chrono::Duration::minutes(10);
+        remote.synced = true;
+
+        store.load_from_sync(vec![remote]).unwrap();
+
+        let result = store.get("same-id").unwrap();
+        assert!(result.deleted);
+        assert_eq!(result.name, "remote deleted");
+    }
+
+    #[test]
+    fn test_load_from_sync_local_newer_deleted_tombstone_is_not_resurrected() {
+        let (mut store, _dir) = temp_store();
+        let base = chrono::Utc::now() - chrono::Duration::hours(1);
+
+        let mut local = Snippet::new_snippet("local deleted".into(), "local content".into(), None);
+        local.id = "same-id".into();
+        local.deleted = true;
+        local.update_date = base + chrono::Duration::minutes(10);
+        store.add(local).unwrap();
+
+        let mut remote =
+            Snippet::new_snippet("remote active".into(), "remote content".into(), None);
+        remote.id = "same-id".into();
+        remote.deleted = false;
+        remote.update_date = base;
+        remote.synced = true;
+
+        store.load_from_sync(vec![remote]).unwrap();
+
+        let result = store.get("same-id").unwrap();
+        assert!(result.deleted);
+        assert_eq!(result.name, "local deleted");
+    }
+
+    #[test]
     fn test_update_not_found_returns_error() {
         let (mut store, _dir) = temp_store();
         let result = store.update("nonexistent", |_| {});
@@ -316,6 +500,66 @@ mod tests {
         let reloaded = SnippetStore::new(path).unwrap();
         assert_eq!(reloaded.list().len(), 1);
         assert_eq!(reloaded.list()[0].name, "persist");
+    }
+
+    #[test]
+    fn test_import_batch_adds_unique_items_and_skips_id_and_name_conflicts() {
+        let (mut store, _dir) = temp_store();
+        let mut existing = Snippet::new_snippet("existing".into(), "one".into(), None);
+        existing.id = "existing-id".into();
+        store.add(existing).unwrap();
+
+        let mut same_id = Snippet::new_snippet("replacement".into(), "two".into(), None);
+        same_id.id = "existing-id".into();
+        let duplicate_name = Snippet::new_snippet("existing".into(), "three".into(), None);
+        let mut new_item = Snippet::new_snippet("new".into(), "four".into(), None);
+        new_item.id = "new-id".into();
+
+        let summary = store
+            .import_batch(vec![same_id, duplicate_name, new_item])
+            .unwrap();
+
+        assert_eq!(summary.added, 1);
+        assert_eq!(summary.skipped_existing_id, 1);
+        assert_eq!(summary.skipped_duplicate, 1);
+        assert_eq!(store.list().len(), 2);
+    }
+
+    #[test]
+    fn test_import_batch_skips_duplicates_within_the_same_batch() {
+        let (mut store, _dir) = temp_store();
+        let mut first = Snippet::new_snippet("same name".into(), "one".into(), None);
+        first.id = "first-id".into();
+        let mut duplicate = Snippet::new_snippet("same name".into(), "two".into(), None);
+        duplicate.id = "second-id".into();
+
+        let summary = store.import_batch(vec![first, duplicate]).unwrap();
+
+        assert_eq!(summary.added, 1);
+        assert_eq!(summary.skipped_existing_id, 0);
+        assert_eq!(summary.skipped_duplicate, 1);
+        assert_eq!(store.list().len(), 1);
+    }
+
+    #[test]
+    fn test_import_batch_does_not_reserve_id_for_name_conflict() {
+        let (mut store, _dir) = temp_store();
+        store
+            .add(Snippet::new_snippet("existing".into(), "one".into(), None))
+            .unwrap();
+        let mut conflicting_name = Snippet::new_snippet("existing".into(), "two".into(), None);
+        conflicting_name.id = "reused-id".into();
+        let mut later_unique_item = Snippet::new_snippet("new".into(), "three".into(), None);
+        later_unique_item.id = "reused-id".into();
+
+        let summary = store
+            .import_batch(vec![conflicting_name, later_unique_item])
+            .unwrap();
+
+        assert_eq!(summary.added, 1);
+        assert_eq!(summary.skipped_existing_id, 0);
+        assert_eq!(summary.skipped_duplicate, 1);
+        assert!(store.get("reused-id").is_some());
     }
 
     #[test]

@@ -252,11 +252,12 @@ impl Config {
         let path = Self::sync_status_path()?;
         if path.exists() {
             let content = fs::read_to_string(&path)?;
-            let status: SyncStatus = serde_json::from_str(&content)
-                .map_err(|e| ConfigError::Io(std::io::Error::new(
+            let status: SyncStatus = serde_json::from_str(&content).map_err(|e| {
+                ConfigError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     e.to_string(),
-                )))?;
+                ))
+            })?;
             Ok(status)
         } else {
             Ok(SyncStatus::default())
@@ -266,11 +267,12 @@ impl Config {
     pub fn save_sync_status(status: &SyncStatus) -> Result<(), ConfigError> {
         let dir = Self::config_dir()?;
         fs::create_dir_all(&dir)?;
-        let content = serde_json::to_string_pretty(status)
-            .map_err(|e| ConfigError::Io(std::io::Error::new(
+        let content = serde_json::to_string_pretty(status).map_err(|e| {
+            ConfigError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 e.to_string(),
-            )))?;
+            ))
+        })?;
         let path = Self::sync_status_path()?;
         fs::write(&path, content)?;
 
@@ -289,9 +291,10 @@ impl Config {
         self.sync_status.history.push(entry);
         // 只保留最近 20 条
         if self.sync_status.history.len() > 20 {
-            self.sync_status.history = self.sync_status.history.split_off(
-                self.sync_status.history.len() - 20
-            );
+            self.sync_status.history = self
+                .sync_status
+                .history
+                .split_off(self.sync_status.history.len() - 20);
         }
     }
 }
