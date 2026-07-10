@@ -1,5 +1,7 @@
 use super::ConfigTab;
-use crate::snippet::config::{Config, SyncHistoryEntry, SyncProvider, SyncResultType, SyncStatus};
+use crate::snippet::config::{
+    Config, GithubConfig, SyncConfig, SyncHistoryEntry, SyncProvider, SyncResultType, SyncStatus,
+};
 use gtk::glib;
 use gtk::prelude::*;
 
@@ -43,24 +45,42 @@ fn show_test_result_dialog(parent: Option<&gtk::Window>, message: &str, is_succe
     dialog.hide();
 }
 
-fn test_github_connection(token: &str) -> Result<String, String> {
+fn validate_github_fields(token: &str, gist_description: &str) -> Result<(), String> {
+    if token.trim().is_empty() {
+        return Err("请填写 GitHub Token".to_string());
+    }
+    if gist_description.trim().is_empty() {
+        return Err("请填写 Gist 名称".to_string());
+    }
+    Ok(())
+}
+
+fn build_github_sync_config(
+    token: &str,
+    gist_description: &str,
+    existing: &GithubConfig,
+) -> SyncConfig {
+    let mut github_config = existing.clone();
+    github_config.token = token.to_string();
+    github_config.gist_description = gist_description.to_string();
+    SyncConfig::github(github_config)
+}
+
+fn test_github_connection(api_base: &str, token: &str) -> Result<String, String> {
+    let url = format!("{}/gists?per_page=1", api_base.trim_end_matches('/'));
     let client = reqwest::blocking::Client::new();
     let response = client
-        .get("https://api.github.com/user")
-        .header("Authorization", format!("token {}", token))
-        .header("User-Agent", "copy-time-tray")
+        .get(url)
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "copy-time-tray/0.3")
         .send()
         .map_err(|e| format!("请求失败: {}", e))?;
 
     if response.status().is_success() {
-        let user: serde_json::Value = response
-            .json()
-            .map_err(|e| format!("解析响应失败: {}", e))?;
-        let login = user["login"].as_str().unwrap_or("未知用户");
-        Ok(format!("连接成功！用户: {}", login))
+        Ok("连接成功！GitHub Gist 访问正常".to_string())
     } else {
-        let status = response.status();
-        Err(format!("认证失败，状态码: {}", status))
+        Err(format!("认证失败，状态码: {}", response.status()))
     }
 }
 
@@ -94,10 +114,8 @@ pub struct SyncTab {
     pub provider_combo: gtk::ComboBoxText,
     pub github_box: gtk::Box,
     pub gitee_box: gtk::Box,
-    pub owner_entry: gtk::Entry,
-    pub repo_entry: gtk::Entry,
-    pub branch_entry: gtk::Entry,
     pub gh_token_entry: gtk::Entry,
+    pub gh_gist_desc_entry: gtk::Entry,
     pub gitee_api_entry: gtk::Entry,
     pub gitee_token_entry: gtk::Entry,
     pub gitee_gist_desc_entry: gtk::Entry,
@@ -115,25 +133,39 @@ impl SyncTab {
 
         // GitHub fields
         let gh_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        let owner_entry = Self::create_entry("GitHub 用户名");
-        let repo_entry = Self::create_entry("仓库名称");
-        let branch_entry = Self::create_entry("分支名称");
         let gh_token_entry = Self::create_password_entry("GitHub Personal Access Token");
+        let gh_gist_desc_entry = Self::create_entry("Gist 描述名称");
+        gh_gist_desc_entry.set_text("CopyTimeTrayConfig");
 
-        gh_box.pack_start(&Self::create_row("Owner:", &owner_entry), false, false, 0);
-        gh_box.pack_start(&Self::create_row("Repo:", &repo_entry), false, false, 0);
-        gh_box.pack_start(&Self::create_row("Branch:", &branch_entry), false, false, 0);
         gh_box.pack_start(
             &Self::create_row("Token:", &gh_token_entry),
             false,
             false,
             0,
         );
+        gh_box.pack_start(
+            &Self::create_row("Gist 名称:", &gh_gist_desc_entry),
+            false,
+            false,
+            0,
+        );
+        let gh_help = gtk::Label::new(Some(
+            "需要 classic PAT 的 gist scope，或 fine-grained PAT 的 account-level Gists: write 权限。",
+        ));
+        gh_help.set_line_wrap(true);
+        gh_help.set_xalign(0.0);
+        gh_help.style_context().add_class("dim-label");
+        gh_box.pack_start(&gh_help, false, false, 0);
 
         // GitHub test connection button
         let gh_test_button = gtk::Button::with_label("测试连接");
         let gh_token_for_test = gh_token_entry.clone();
-        let gh_test_button_for_signal = gh_test_button.clone();
+        let gh_api_base_for_test = Config::load()
+            .ok()
+            .and_then(|config| config.sync)
+            .map(|sync| sync.github_config.api_base)
+            .filter(|api_base| !api_base.is_empty())
+            .unwrap_or_else(|| GithubConfig::default().api_base);
         gh_test_button.connect_clicked(move |button| {
             let token = gh_token_for_test.text().to_string();
             if token.is_empty() {
@@ -150,8 +182,9 @@ impl SyncTab {
             button.set_sensitive(false);
             button.set_label("测试中...");
             let (sender, receiver) = async_channel::bounded(1);
+            let api_base = gh_api_base_for_test.clone();
             std::thread::spawn(move || {
-                let result = test_github_connection(&token);
+                let result = test_github_connection(&api_base, &token);
                 let _ = sender.send_blocking(result);
             });
             let button_weak = button.downgrade();
@@ -285,10 +318,8 @@ impl SyncTab {
             provider_combo,
             github_box: gh_box,
             gitee_box,
-            owner_entry,
-            repo_entry,
-            branch_entry,
             gh_token_entry,
+            gh_gist_desc_entry,
             gitee_api_entry,
             gitee_token_entry,
             gitee_gist_desc_entry,
@@ -447,9 +478,7 @@ impl ConfigTab for SyncTab {
         sync_button.style_context().add_class("suggested-action");
         let sync_provider_combo = self.provider_combo.clone();
         let sync_gh_token = self.gh_token_entry.clone();
-        let sync_gh_owner = self.owner_entry.clone();
-        let sync_gh_repo = self.repo_entry.clone();
-        let sync_gh_branch = self.branch_entry.clone();
+        let sync_gh_desc = self.gh_gist_desc_entry.clone();
         let sync_gitee_api = self.gitee_api_entry.clone();
         let sync_gitee_token = self.gitee_token_entry.clone();
         let sync_gitee_desc = self.gitee_gist_desc_entry.clone();
@@ -491,26 +520,21 @@ impl ConfigTab for SyncTab {
                     },
                 }
             } else {
-                let owner = sync_gh_owner.text().to_string();
-                let repo = sync_gh_repo.text().to_string();
-                let branch = sync_gh_branch.text().to_string();
                 let token = sync_gh_token.text().to_string();
-                if owner.is_empty() || repo.is_empty() || branch.is_empty() || token.is_empty() {
+                let gist_description = sync_gh_desc.text().to_string();
+                if let Err(error) = validate_github_fields(&token, &gist_description) {
                     let _ = notify_rust::Notification::new()
                         .summary("同步失败")
-                        .body("请先填写所有 GitHub 字段")
+                        .body(&error)
                         .show();
                     return;
                 }
-                crate::snippet::config::SyncConfig {
-                    provider: crate::snippet::config::SyncProvider::Github,
-                    owner,
-                    repo,
-                    branch,
-                    token,
-                    github_config: crate::snippet::config::GithubConfig::default(),
-                    gitee_config: crate::snippet::config::GiteeConfig::default(),
-                }
+                let existing_github_config = Config::load()
+                    .ok()
+                    .and_then(|cfg| cfg.sync)
+                    .map(|sync| sync.github_config)
+                    .unwrap_or_default();
+                build_github_sync_config(&token, &gist_description, &existing_github_config)
             };
 
             button.set_sensitive(false);
@@ -584,15 +608,10 @@ impl ConfigTab for SyncTab {
         };
 
         match provider {
-            SyncProvider::Github => {
-                let owner = self.owner_entry.text().to_string();
-                let repo = self.repo_entry.text().to_string();
-                let branch = self.branch_entry.text().to_string();
-                let token = self.gh_token_entry.text().to_string();
-                if owner.is_empty() || repo.is_empty() || branch.is_empty() || token.is_empty() {
-                    return Err("请填写所有 GitHub 字段".to_string());
-                }
-            }
+            SyncProvider::Github => validate_github_fields(
+                self.gh_token_entry.text().as_str(),
+                self.gh_gist_desc_entry.text().as_str(),
+            )?,
             SyncProvider::Gitee => {
                 let api_base = self.gitee_api_entry.text().to_string();
                 let token = self.gitee_token_entry.text().to_string();
@@ -616,10 +635,14 @@ impl ConfigTab for SyncTab {
             match sync_config.provider {
                 SyncProvider::Github => {
                     self.provider_combo.set_active(Some(0));
-                    self.owner_entry.set_text(&sync_config.owner);
-                    self.repo_entry.set_text(&sync_config.repo);
-                    self.branch_entry.set_text(&sync_config.branch);
-                    self.gh_token_entry.set_text(&sync_config.token);
+                    self.gh_token_entry.set_text(sync_config.github_token());
+                    let gist_description = if sync_config.github_config.gist_description.is_empty()
+                    {
+                        "CopyTimeTrayConfig"
+                    } else {
+                        &sync_config.github_config.gist_description
+                    };
+                    self.gh_gist_desc_entry.set_text(gist_description);
                 }
                 SyncProvider::Gitee => {
                     self.provider_combo.set_active(Some(1));
@@ -648,7 +671,8 @@ impl ConfigTab for SyncTab {
 
 #[cfg(test)]
 mod tests {
-    use super::{ManualSyncAction, SyncTab};
+    use super::{build_github_sync_config, validate_github_fields, ManualSyncAction, SyncTab};
+    use crate::snippet::config::GithubConfig;
 
     #[test]
     fn test_provider_visibility_defaults_to_github_only() {
@@ -675,5 +699,40 @@ mod tests {
             SyncTab::manual_sync_action(Some("github")),
             ManualSyncAction::ManagerPullThenPush
         );
+    }
+
+    #[test]
+    fn github_validation_requires_token_and_gist_description_only() {
+        assert!(validate_github_fields("token", "CopyTimeTrayConfig").is_ok());
+        assert_eq!(
+            validate_github_fields("", "CopyTimeTrayConfig"),
+            Err("请填写 GitHub Token".to_string())
+        );
+        assert_eq!(
+            validate_github_fields("token", ""),
+            Err("请填写 Gist 名称".to_string())
+        );
+    }
+
+    #[test]
+    fn github_sync_config_uses_provider_config_and_preserves_gist_id() {
+        let existing = GithubConfig {
+            api_base: "https://github.example/api/v3".to_string(),
+            token: String::new(),
+            gist_id: Some("existing-gist".to_string()),
+            gist_description: "Old description".to_string(),
+        };
+
+        let sync = build_github_sync_config("new-token", "New description", &existing);
+
+        assert_eq!(sync.provider, crate::snippet::config::SyncProvider::Github);
+        assert!(sync.owner.is_empty());
+        assert!(sync.repo.is_empty());
+        assert!(sync.branch.is_empty());
+        assert!(sync.token.is_empty());
+        assert_eq!(sync.github_config.api_base, "https://github.example/api/v3");
+        assert_eq!(sync.github_config.token, "new-token");
+        assert_eq!(sync.github_config.gist_id.as_deref(), Some("existing-gist"));
+        assert_eq!(sync.github_config.gist_description, "New description");
     }
 }
