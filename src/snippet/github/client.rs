@@ -164,11 +164,15 @@ fn raw_authentication_policy(api_base: &str, raw_url: &str) -> Result<RawAuthent
     }
 
     let api_host = api_url.host_str().ok_or_else(untrusted_raw_url_error)?;
-    if api_host == raw_host {
+    if api_host == raw_host && api_url.port_or_known_default() == raw_url.port_or_known_default() {
         return Ok(RawAuthentication::Bearer);
     }
 
-    if api_host == GITHUB_API_HOST && GITHUB_RAW_HOSTS.contains(&raw_host) {
+    if api_host == GITHUB_API_HOST
+        && api_url.port_or_known_default() == Some(443)
+        && GITHUB_RAW_HOSTS.contains(&raw_host)
+        && raw_url.port_or_known_default() == Some(443)
+    {
         return Ok(RawAuthentication::Bearer);
     }
 
@@ -254,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_authentication_policy_authenticates_only_https_api_base_same_origin_urls() {
+    fn raw_authentication_policy_requires_matching_https_origin_for_custom_api_bases() {
         assert_eq!(
             raw_authentication_policy(
                 "https://github.example/api/v3",
@@ -268,15 +272,29 @@ mod tests {
             "http://github.example/api/v3/gists/1/raw",
         )
         .is_err());
+        assert!(raw_authentication_policy(
+            "https://github.example/api/v3",
+            "https://github.example:8443/api/v3/gists/1/raw",
+        )
+        .is_err());
         assert_eq!(
             raw_authentication_policy(
-                "https://github.example/api/v3",
+                "https://github.example:8443/api/v3",
                 "https://github.example:8443/api/v3/gists/1/raw",
             )
             .unwrap(),
             RawAuthentication::Bearer,
         );
         assert!(raw_authentication_policy("https://github.example/api/v3", "not a URL").is_err());
+    }
+
+    #[test]
+    fn raw_authentication_policy_requires_default_https_port_for_official_raw_hosts() {
+        assert!(raw_authentication_policy(
+            "https://api.github.com",
+            "https://gist.githubusercontent.com:4444/user/gist/raw/tree.json",
+        )
+        .is_err());
     }
 
     #[test]
