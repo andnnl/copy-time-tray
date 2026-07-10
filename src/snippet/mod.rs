@@ -1,5 +1,6 @@
 pub mod config;
 pub mod gitee;
+pub mod github;
 pub mod import_export;
 pub mod model;
 pub mod store;
