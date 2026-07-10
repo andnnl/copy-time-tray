@@ -3,16 +3,27 @@ use super::types::{Gist, GistCreate, GistUpdate};
 use crate::snippet::config::GithubConfig;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
+use reqwest::redirect::Policy;
+use reqwest::Url;
 
 const ACCEPT_VALUE: &str = "application/vnd.github+json";
 const USER_AGENT_VALUE: &str = "copy-time-tray/0.3";
 const PAGE_SIZE: usize = 100;
+const GITHUB_API_HOST: &str = "api.github.com";
+const GITHUB_RAW_HOSTS: &[&str] = &["gist.githubusercontent.com", "raw.githubusercontent.com"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RawAuthentication {
+    Bearer,
+    Anonymous,
+}
 
 #[derive(Debug, Clone)]
 pub struct GithubClient {
     api_base: String,
     headers: HeaderMap,
     client: Client,
+    raw_client: Client,
 }
 
 impl GithubClient {
@@ -35,6 +46,12 @@ impl GithubClient {
             api_base,
             headers,
             client: Client::new(),
+            // Raw content URLs must not redirect to another host after their
+            // trust decision has been made.
+            raw_client: Client::builder()
+                .redirect(Policy::none())
+                .build()
+                .expect("reqwest client configuration must be valid"),
         }
     }
 
@@ -73,13 +90,15 @@ impl GithubClient {
     }
 
     pub fn fetch_raw(&self, url: &str) -> Result<String> {
-        self.check_status(
-            self.with_headers(self.client.get(url))
-                .send()
-                .map_err(network_error)?,
-        )?
-        .text()
-        .map_err(network_error)
+        let request = self.raw_client.get(url);
+        let request = match raw_authentication_policy(&self.api_base, url)? {
+            RawAuthentication::Bearer => self.with_headers(request),
+            RawAuthentication::Anonymous => request,
+        };
+
+        self.check_status(request.send().map_err(network_error)?)?
+            .text()
+            .map_err(network_error)
     }
 
     fn url_gists(&self) -> String {
@@ -134,6 +153,37 @@ pub fn find_reusable_gist_id(gists: &[Gist], description: &str) -> Option<String
         .map(|gist| gist.id.clone())
 }
 
+fn raw_authentication_policy(api_base: &str, raw_url: &str) -> Result<RawAuthentication> {
+    let raw_url = Url::parse(raw_url).map_err(|_| untrusted_raw_url_error())?;
+    if raw_url.scheme() != "https" {
+        return Err(untrusted_raw_url_error());
+    }
+
+    let raw_host = raw_url.host_str().ok_or_else(untrusted_raw_url_error)?;
+    let api_url = Url::parse(api_base).map_err(|_| untrusted_raw_url_error())?;
+    if api_url.scheme() != "https" {
+        return Err(untrusted_raw_url_error());
+    }
+
+    let api_host = api_url.host_str().ok_or_else(untrusted_raw_url_error)?;
+    if api_host == raw_host {
+        return Ok(RawAuthentication::Bearer);
+    }
+
+    if api_host == GITHUB_API_HOST && GITHUB_RAW_HOSTS.contains(&raw_host) {
+        return Ok(RawAuthentication::Anonymous);
+    }
+
+    Err(untrusted_raw_url_error())
+}
+
+fn untrusted_raw_url_error() -> GithubError {
+    GithubError::Http {
+        status: 400,
+        body: "untrusted raw URL: only HTTPS API-base hosts and official GitHub raw-content hosts are allowed".into(),
+    }
+}
+
 fn network_error(error: reqwest::Error) -> GithubError {
     GithubError::Network(error.without_url().to_string())
 }
@@ -151,7 +201,9 @@ fn redact_token(body: &str, headers: &HeaderMap) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_reusable_gist_id, GithubClient};
+    use super::{
+        find_reusable_gist_id, raw_authentication_policy, GithubClient, RawAuthentication,
+    };
     use crate::snippet::config::GithubConfig;
     use crate::snippet::github::types::{Gist, GistCreate, GistFile, GistFileCreate};
     use chrono::{DateTime, Utc};
@@ -187,6 +239,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn raw_authentication_policy_rejects_untrusted_urls_without_a_token() {
+        let error = raw_authentication_policy(
+            "https://api.github.com",
+            "https://attacker.example/raw/tree.json",
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::snippet::github::error::GithubError::Http { status: 400, .. }
+        ));
+        assert!(error.to_string().contains("untrusted raw URL"));
+    }
+
+    #[test]
+    fn raw_authentication_policy_authenticates_only_https_api_base_same_origin_urls() {
+        assert_eq!(
+            raw_authentication_policy(
+                "https://github.example/api/v3",
+                "https://github.example/api/v3/gists/1/raw",
+            )
+            .unwrap(),
+            RawAuthentication::Bearer,
+        );
+        assert!(raw_authentication_policy(
+            "https://github.example/api/v3",
+            "http://github.example/api/v3/gists/1/raw",
+        )
+        .is_err());
+        assert_eq!(
+            raw_authentication_policy(
+                "https://github.example/api/v3",
+                "https://github.example:8443/api/v3/gists/1/raw",
+            )
+            .unwrap(),
+            RawAuthentication::Bearer,
+        );
+        assert!(raw_authentication_policy("https://github.example/api/v3", "not a URL").is_err());
+    }
+
+    #[test]
+    fn raw_authentication_policy_allows_official_github_raw_hosts_anonymously() {
+        for raw_url in [
+            "https://gist.githubusercontent.com/user/gist/raw/tree.json",
+            "https://raw.githubusercontent.com/user/repo/main/tree.json",
+        ] {
+            assert_eq!(
+                raw_authentication_policy("https://api.github.com", raw_url).unwrap(),
+                RawAuthentication::Anonymous,
+            );
+        }
+    }
     #[test]
     fn gist_requests_use_bearer_accept_and_user_agent_headers() {
         let client = GithubClient::new(github_config());
