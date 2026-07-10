@@ -51,17 +51,13 @@ fn set_gitee_gist_id(config: &mut Config, id: String) {
     set_gist_id(config, &config::SyncProvider::Gitee, id);
 }
 
-fn snippets_for_push(sync_config: &config::SyncConfig, store: &SnippetStore) -> Vec<Snippet> {
-    match sync_config.provider {
-        config::SyncProvider::Gitee => store.list().iter().cloned().collect(),
-        config::SyncProvider::Github => store.pending_sync().into_iter().cloned().collect(),
-    }
+fn snippets_for_push(_sync_config: &config::SyncConfig, store: &SnippetStore) -> Vec<Snippet> {
+    store.list().iter().cloned().collect()
 }
 
 pub struct SnippetManager {
     store: Mutex<SnippetStore>,
     config: Config,
-    client: sync::RealHttpClient,
     ui_sender: Option<Sender<UiResponse>>,
     ui_receiver: Option<Receiver<UiResponse>>,
     /// Tracks the next push sequence number; incremented on each schedule_push call.
@@ -85,8 +81,6 @@ impl SnippetManager {
             store.list().len()
         );
 
-        let client = sync::RealHttpClient::new();
-
         let (tx, rx) = unbounded();
 
         let push_seq = Arc::new(AtomicU64::new(0));
@@ -94,7 +88,6 @@ impl SnippetManager {
         Ok(Self {
             store: Mutex::new(store),
             config,
-            client,
             ui_sender: Some(tx),
             ui_receiver: Some(rx),
             push_seq,
@@ -127,8 +120,7 @@ impl SnippetManager {
             .join("snippets.json");
         thread::spawn(move || {
             eprintln!("[SYNC] Pulling from remote...");
-            let client = sync::RealHttpClient::new();
-            match sync::pull(&sync_config, &client) {
+            match sync::pull(&sync_config) {
                 Ok(remote) => {
                     eprintln!(
                         "[SYNC] Pull succeeded, {} snippets from remote",
@@ -166,7 +158,7 @@ impl SnippetManager {
             .sync
             .as_ref()
             .ok_or_else(|| "未配置同步".to_string())?;
-        let remote = sync::pull(sync_config, &self.client).map_err(|e| e.to_string())?;
+        let remote = sync::pull(sync_config).map_err(|e| e.to_string())?;
         if let Ok(mut store) = self.store.lock() {
             store.load_from_sync(remote).map_err(|e| e.to_string())?;
         }
@@ -179,10 +171,6 @@ impl SnippetManager {
         cfg.save().map_err(|e| e.to_string())?;
         set_gist_id(&mut self.config, provider, id);
         Ok(())
-    }
-
-    fn apply_gitee_gist_id(&mut self, id: String) -> Result<(), String> {
-        self.apply_gist_id(&config::SyncProvider::Gitee, id)
     }
 
     pub fn do_push(&mut self) -> Result<(), String> {
@@ -204,13 +192,13 @@ impl SnippetManager {
         }
         for attempt in 0..MAX_RETRIES {
             eprintln!("[SYNC] Push attempt {} of {}", attempt + 1, MAX_RETRIES);
-            match sync::push(&sync_config, &self.client, &pending) {
+            match sync::push(&sync_config, &pending) {
                 Ok((_, gist_id)) => {
                     eprintln!("[SYNC] Push succeeded, gist_id={:?}", gist_id);
                     if let Some(id) = gist_id {
                         if !id.is_empty() {
                             eprintln!("[SYNC] Got gist_id: {}", id);
-                            self.apply_gitee_gist_id(id)?;
+                            self.apply_gist_id(&sync_config.provider, id)?;
                             eprintln!("[SYNC] Saved gist_id to config and updated runtime config");
                         }
                     }
@@ -268,7 +256,6 @@ impl SnippetManager {
         let store_path = Config::config_dir()
             .expect("config_dir")
             .join("snippets.json");
-        let client = sync::RealHttpClient::new();
 
         thread::spawn(move || {
             eprintln!("[SYNC] Waiting {}ms for debounce...", DEBOUNCE_MS);
@@ -293,7 +280,7 @@ impl SnippetManager {
                 Err(_) => sync_config.clone(),
             };
 
-            match sync::pull(&sync_config, &client) {
+            match sync::pull(&sync_config) {
                 Ok(remote) => {
                     if !remote.is_empty() {
                         match SnippetStore::new(store_path.clone()) {
@@ -339,7 +326,7 @@ impl SnippetManager {
                     attempt + 1,
                     MAX_RETRIES
                 );
-                match sync::push(&sync_config, &client, &pending) {
+                match sync::push(&sync_config, &pending) {
                     Ok((_, gist_id)) => {
                         eprintln!(
                             "[SYNC] schedule_push: push succeeded, gist_id={:?}",
@@ -349,7 +336,7 @@ impl SnippetManager {
                             if !id.is_empty() {
                                 match Config::load() {
                                     Ok(mut cfg) => {
-                                        set_gitee_gist_id(&mut cfg, id);
+                                        set_gist_id(&mut cfg, &sync_config.provider, id);
                                         if let Err(e) = cfg.save() {
                                             eprintln!(
                                                 "[SYNC] schedule_push: save gist_id failed: {}",
@@ -402,7 +389,7 @@ impl SnippetManager {
             .as_ref()
             .ok_or_else(|| "未配置同步".to_string())?;
         for attempt in 0..MAX_RETRIES {
-            match sync::pull(sync_config, &self.client) {
+            match sync::pull(sync_config) {
                 Ok(remote) => {
                     if !remote.is_empty() {
                         if let Ok(mut store) = self.store.lock() {
@@ -556,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn test_github_push_uses_only_pending_items() {
+    fn test_github_push_uses_whole_tree_not_only_pending_items() {
         let mut config = gitee_config_with_id(Some("gist-id"));
         let sync_config = config.sync.as_mut().unwrap();
         sync_config.provider = SyncProvider::Github;
@@ -576,8 +563,9 @@ mod tests {
 
         let snippets = snippets_for_push(&sync_config, &store);
 
-        assert_eq!(snippets.len(), 1);
-        assert_eq!(snippets[0].id, "pending-id");
+        assert_eq!(snippets.len(), 2);
+        assert!(snippets.iter().any(|s| s.id == "synced-id"));
+        assert!(snippets.iter().any(|s| s.id == "pending-id"));
     }
 }
 
