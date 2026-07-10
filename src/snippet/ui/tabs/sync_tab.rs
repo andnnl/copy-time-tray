@@ -1,6 +1,7 @@
 use super::ConfigTab;
 use crate::snippet::config::{
-    Config, GithubConfig, SyncConfig, SyncHistoryEntry, SyncProvider, SyncResultType, SyncStatus,
+    Config, GiteeConfig, GithubConfig, SyncConfig, SyncHistoryEntry, SyncProvider, SyncResultType,
+    SyncStatus,
 };
 use gtk::glib;
 use gtk::prelude::*;
@@ -55,15 +56,18 @@ fn validate_github_fields(token: &str, gist_description: &str) -> Result<(), Str
     Ok(())
 }
 
-fn build_github_sync_config(
+pub(crate) fn build_github_sync_config(
     token: &str,
     gist_description: &str,
-    existing: &GithubConfig,
+    existing_github_config: &GithubConfig,
+    existing_gitee_config: &GiteeConfig,
 ) -> SyncConfig {
-    let mut github_config = existing.clone();
+    let mut github_config = existing_github_config.clone();
     github_config.token = token.to_string();
     github_config.gist_description = gist_description.to_string();
-    SyncConfig::github(github_config)
+    let mut sync_config = SyncConfig::github(github_config);
+    sync_config.gitee_config = existing_gitee_config.clone();
+    sync_config
 }
 
 fn test_github_connection(api_base: &str, token: &str) -> Result<String, String> {
@@ -499,23 +503,28 @@ impl ConfigTab for SyncTab {
                         .show();
                     return;
                 }
-                let existing_gist_id = Config::load()
-                    .ok()
-                    .and_then(|cfg| cfg.sync)
-                    .and_then(|sync| sync.gitee_config.gist_id);
+                let existing_sync_config = Config::load().ok().and_then(|cfg| cfg.sync);
+                let existing_github_config = existing_sync_config
+                    .as_ref()
+                    .map(|sync| sync.github_config.clone())
+                    .unwrap_or_default();
+                let existing_gitee_config = existing_sync_config
+                    .as_ref()
+                    .map(|sync| sync.gitee_config.clone())
+                    .unwrap_or_default();
                 crate::snippet::config::SyncConfig {
                     provider: crate::snippet::config::SyncProvider::Gitee,
                     owner: String::new(),
                     repo: String::new(),
                     branch: String::new(),
                     token: String::new(),
-                    github_config: crate::snippet::config::GithubConfig::default(),
+                    github_config: existing_github_config,
                     gitee_config: crate::snippet::config::GiteeConfig {
                         api_base,
                         token,
-                        auto_sync: true,
-                        sync_interval: 300,
-                        gist_id: existing_gist_id,
+                        auto_sync: existing_gitee_config.auto_sync,
+                        sync_interval: existing_gitee_config.sync_interval,
+                        gist_id: existing_gitee_config.gist_id,
                         gist_description: gist_desc,
                     },
                 }
@@ -529,12 +538,21 @@ impl ConfigTab for SyncTab {
                         .show();
                     return;
                 }
-                let existing_github_config = Config::load()
-                    .ok()
-                    .and_then(|cfg| cfg.sync)
-                    .map(|sync| sync.github_config)
+                let existing_sync_config = Config::load().ok().and_then(|cfg| cfg.sync);
+                let existing_github_config = existing_sync_config
+                    .as_ref()
+                    .map(|sync| sync.github_config.clone())
                     .unwrap_or_default();
-                build_github_sync_config(&token, &gist_description, &existing_github_config)
+                let existing_gitee_config = existing_sync_config
+                    .as_ref()
+                    .map(|sync| sync.gitee_config.clone())
+                    .unwrap_or_default();
+                build_github_sync_config(
+                    &token,
+                    &gist_description,
+                    &existing_github_config,
+                    &existing_gitee_config,
+                )
             };
 
             button.set_sensitive(false);
@@ -672,7 +690,7 @@ impl ConfigTab for SyncTab {
 #[cfg(test)]
 mod tests {
     use super::{build_github_sync_config, validate_github_fields, ManualSyncAction, SyncTab};
-    use crate::snippet::config::GithubConfig;
+    use crate::snippet::config::{GiteeConfig, GithubConfig};
 
     #[test]
     fn test_provider_visibility_defaults_to_github_only() {
@@ -715,6 +733,30 @@ mod tests {
     }
 
     #[test]
+    fn github_sync_config_preserves_existing_gitee_gist_binding() {
+        let existing_github = GithubConfig::default();
+        let existing_gitee = GiteeConfig {
+            api_base: "https://gitee.example/api/v5".to_string(),
+            token: "gitee-token".to_string(),
+            auto_sync: false,
+            sync_interval: 600,
+            gist_id: Some("gitee-gist".to_string()),
+            gist_description: "Existing Gitee Gist".to_string(),
+        };
+
+        let sync = build_github_sync_config(
+            "github-token",
+            "GitHub Gist",
+            &existing_github,
+            &existing_gitee,
+        );
+
+        assert_eq!(sync.gitee_config.gist_id.as_deref(), Some("gitee-gist"));
+        assert_eq!(sync.gitee_config.token, "gitee-token");
+        assert_eq!(sync.gitee_config.gist_description, "Existing Gitee Gist");
+    }
+
+    #[test]
     fn github_sync_config_uses_provider_config_and_preserves_gist_id() {
         let existing = GithubConfig {
             api_base: "https://github.example/api/v3".to_string(),
@@ -723,7 +765,12 @@ mod tests {
             gist_description: "Old description".to_string(),
         };
 
-        let sync = build_github_sync_config("new-token", "New description", &existing);
+        let sync = build_github_sync_config(
+            "new-token",
+            "New description",
+            &existing,
+            &GiteeConfig::default(),
+        );
 
         assert_eq!(sync.provider, crate::snippet::config::SyncProvider::Github);
         assert!(sync.owner.is_empty());

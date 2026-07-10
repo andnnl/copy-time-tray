@@ -1,5 +1,6 @@
+use super::tabs::sync_tab::build_github_sync_config;
 use super::tabs::{about_tab, general_tab, sync_tab, ConfigTab};
-use crate::snippet::config::{Config, GiteeConfig, GithubConfig, SyncConfig, SyncProvider};
+use crate::snippet::config::{Config, GiteeConfig, SyncConfig, SyncProvider};
 use gtk::prelude::*;
 
 pub struct ConfigWindow {
@@ -97,15 +98,25 @@ impl ConfigWindow {
                     .as_ref()
                     .map(|sync| sync.github_config.clone())
                     .unwrap_or_default();
-                let mut github_config = existing_github_config;
-                github_config.token = dialog.sync_tab.gh_token_entry.text().to_string();
-                github_config.gist_description =
-                    dialog.sync_tab.gh_gist_desc_entry.text().to_string();
-                SyncConfig::github(github_config)
+                let existing_gitee_config = existing_sync_config
+                    .as_ref()
+                    .map(|sync| sync.gitee_config.clone())
+                    .unwrap_or_default();
+                build_github_sync_config(
+                    dialog.sync_tab.gh_token_entry.text().as_str(),
+                    dialog.sync_tab.gh_gist_desc_entry.text().as_str(),
+                    &existing_github_config,
+                    &existing_gitee_config,
+                )
             }
             SyncProvider::Gitee => {
+                let existing_github_config = existing_sync_config
+                    .as_ref()
+                    .map(|sync| sync.github_config.clone())
+                    .unwrap_or_default();
                 let existing_gitee_config = existing_sync_config
-                    .map(|sync| sync.gitee_config)
+                    .as_ref()
+                    .map(|sync| sync.gitee_config.clone())
                     .unwrap_or_default();
                 SyncConfig {
                     provider: SyncProvider::Gitee,
@@ -113,7 +124,7 @@ impl ConfigWindow {
                     repo: String::new(),
                     branch: String::new(),
                     token: String::new(),
-                    github_config: GithubConfig::default(),
+                    github_config: existing_github_config,
                     gitee_config: GiteeConfig {
                         api_base: dialog.sync_tab.gitee_api_entry.text().to_string(),
                         token: dialog.sync_tab.gitee_token_entry.text().to_string(),
