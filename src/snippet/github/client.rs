@@ -15,7 +15,6 @@ const GITHUB_RAW_HOSTS: &[&str] = &["gist.githubusercontent.com", "raw.githubuse
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RawAuthentication {
     Bearer,
-    Anonymous,
 }
 
 #[derive(Debug, Clone)]
@@ -90,11 +89,8 @@ impl GithubClient {
     }
 
     pub fn fetch_raw(&self, url: &str) -> Result<String> {
-        let request = self.raw_client.get(url);
-        let request = match raw_authentication_policy(&self.api_base, url)? {
-            RawAuthentication::Bearer => self.with_headers(request),
-            RawAuthentication::Anonymous => request,
-        };
+        raw_authentication_policy(&self.api_base, url)?;
+        let request = self.with_headers(self.raw_client.get(url));
 
         self.check_status(request.send().map_err(network_error)?)?
             .text()
@@ -147,7 +143,9 @@ pub fn find_reusable_gist_id(gists: &[Gist], description: &str) -> Option<String
     gists
         .iter()
         .filter(|gist| {
-            gist.description.as_deref() == Some(description) && gist.files.contains_key("tree.json")
+            !gist.public
+                && gist.description.as_deref() == Some(description)
+                && gist.files.contains_key("tree.json")
         })
         .max_by_key(|gist| gist.updated_at)
         .map(|gist| gist.id.clone())
@@ -171,7 +169,7 @@ fn raw_authentication_policy(api_base: &str, raw_url: &str) -> Result<RawAuthent
     }
 
     if api_host == GITHUB_API_HOST && GITHUB_RAW_HOSTS.contains(&raw_host) {
-        return Ok(RawAuthentication::Anonymous);
+        return Ok(RawAuthentication::Bearer);
     }
 
     Err(untrusted_raw_url_error())
@@ -236,6 +234,7 @@ mod tests {
             files,
             created_at: Some(updated_at.parse::<DateTime<Utc>>().unwrap()),
             updated_at: Some(updated_at.parse::<DateTime<Utc>>().unwrap()),
+            public: false,
         }
     }
 
@@ -281,14 +280,14 @@ mod tests {
     }
 
     #[test]
-    fn raw_authentication_policy_allows_official_github_raw_hosts_anonymously() {
+    fn raw_authentication_policy_authenticates_official_github_raw_hosts() {
         for raw_url in [
             "https://gist.githubusercontent.com/user/gist/raw/tree.json",
             "https://raw.githubusercontent.com/user/repo/main/tree.json",
         ] {
             assert_eq!(
                 raw_authentication_policy("https://api.github.com", raw_url).unwrap(),
-                RawAuthentication::Anonymous,
+                RawAuthentication::Bearer,
             );
         }
     }
@@ -370,6 +369,38 @@ mod tests {
             find_reusable_gist_id(&gists, "CopyTimeTrayConfig"),
             Some("newer".into())
         );
+    }
+
+    #[test]
+    fn reusable_gist_ignores_public_candidates_even_when_newer() {
+        let mut public_newer = gist(
+            "public-newer",
+            Some("CopyTimeTrayConfig"),
+            "2026-07-12T12:00:00Z",
+            true,
+        );
+        public_newer.public = true;
+        let gists = vec![
+            gist(
+                "private-older",
+                Some("CopyTimeTrayConfig"),
+                "2026-07-11T12:00:00Z",
+                true,
+            ),
+            public_newer,
+        ];
+
+        assert_eq!(
+            find_reusable_gist_id(&gists, "CopyTimeTrayConfig"),
+            Some("private-older".into())
+        );
+    }
+
+    #[test]
+    fn gist_requires_the_public_field_from_github_responses() {
+        let result = serde_json::from_str::<Gist>(r#"{"id":"gist","description":null,"files":{}}"#);
+
+        assert!(result.is_err());
     }
 
     #[test]

@@ -7,6 +7,7 @@ pub struct Gist {
     pub id: String,
     pub description: Option<String>,
     pub files: HashMap<String, GistFile>,
+    pub public: bool,
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
     #[serde(default)]

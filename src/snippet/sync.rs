@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::snippet::config::{GiteeConfig, SyncConfig, SyncProvider};
+use crate::snippet::config::{GiteeConfig, GithubConfig, SyncConfig, SyncProvider};
 use crate::snippet::gitee::types::{Gist, GistCreate, GistFileCreate, GistUpdate};
 use crate::snippet::gitee::GiteeClient;
 use crate::snippet::github::client::{find_reusable_gist_id, GithubClient};
@@ -148,7 +148,17 @@ fn github_error(error: GithubError) -> SyncError {
     error.into()
 }
 
+fn github_token(config: &SyncConfig) -> Result<&str, SyncError> {
+    let token = config.github_token();
+    if token.trim().is_empty() {
+        Err(SyncError::Config("GitHub token is required".into()))
+    } else {
+        Ok(token)
+    }
+}
+
 fn pull_from_github_gist(config: &SyncConfig) -> Result<Vec<Snippet>, SyncError> {
+    github_token(config)?;
     let gist_id = match github_gist_id_for_pull(config) {
         Some(id) => id,
         None => return Ok(Vec::new()),
@@ -217,8 +227,19 @@ fn serialized_tree(snippets: &[Snippet]) -> Result<(Vec<&Snippet>, String), Sync
     Ok((active, content))
 }
 
+fn github_gist_can_be_updated(gist: &crate::snippet::github::types::Gist) -> Result<(), SyncError> {
+    if gist.public {
+        Err(SyncError::Config(
+            "refusing to overwrite a public GitHub Gist".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn push_to_github_gist(config: &SyncConfig, snippets: &[Snippet]) -> Result<String, SyncError> {
     let (active, tree_json) = serialized_tree(snippets)?;
+    github_token(config)?;
     let github_config = &config.github_config;
     if active.is_empty() && github_config.gist_id.is_none() {
         return Ok(String::new());
@@ -226,7 +247,10 @@ fn push_to_github_gist(config: &SyncConfig, snippets: &[Snippet]) -> Result<Stri
     let client = github_client(config);
     let gist_id = match &github_config.gist_id {
         Some(id) => match client.get_gist(id) {
-            Ok(_) => id.clone(),
+            Ok(gist) => {
+                github_gist_can_be_updated(&gist)?;
+                id.clone()
+            }
             Err(GithubError::NotFound) => {
                 select_or_create_github_gist(&client, github_config, &tree_json)?
             }
@@ -410,6 +434,7 @@ mod tests {
                     raw_url: None,
                 },
             )]),
+            public: false,
             created_at: None,
             updated_at: Some(updated.parse().unwrap()),
         };
@@ -423,6 +448,66 @@ mod tests {
             ),
             Some("new".into())
         );
+    }
+
+    #[test]
+    fn public_github_gist_cannot_be_updated() {
+        let gist = Gist {
+            id: "public".into(),
+            description: Some("CopyTimeTrayConfig".into()),
+            files: HashMap::new(),
+            public: true,
+            created_at: None,
+            updated_at: None,
+        };
+
+        assert!(matches!(
+            github_gist_can_be_updated(&gist),
+            Err(SyncError::Config(message)) if message == "refusing to overwrite a public GitHub Gist"
+        ));
+    }
+
+    #[test]
+    fn test_github_reuse_ignores_public_gists() {
+        let gist = |id: &str, updated: &str, public: bool| Gist {
+            id: id.into(),
+            description: Some("CopyTimeTrayConfig".into()),
+            files: HashMap::from([(
+                "tree.json".into(),
+                GistFile {
+                    content: Some("[]".into()),
+                    truncated: false,
+                    raw_url: None,
+                },
+            )]),
+            public,
+            created_at: None,
+            updated_at: Some(updated.parse().unwrap()),
+        };
+        assert_eq!(
+            find_reusable_gist_id(
+                &[
+                    gist("private", "2026-01-01T00:00:00Z", false),
+                    gist("public", "2026-01-02T00:00:00Z", true),
+                ],
+                "CopyTimeTrayConfig"
+            ),
+            Some("private".into())
+        );
+    }
+
+    #[test]
+    fn github_requires_a_token_before_pull_or_push() {
+        let config = SyncConfig::github(GithubConfig::default());
+
+        assert!(matches!(
+            pull(&config),
+            Err(SyncError::Config(message)) if message == "GitHub token is required"
+        ));
+        assert!(matches!(
+            push(&config, &[]),
+            Err(SyncError::Config(message)) if message == "GitHub token is required"
+        ));
     }
 
     #[test]

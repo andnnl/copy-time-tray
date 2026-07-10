@@ -70,6 +70,30 @@ pub(crate) fn build_github_sync_config(
     sync_config
 }
 
+pub(crate) fn build_gitee_sync_config(
+    api_base: &str,
+    token: &str,
+    gist_description: &str,
+    existing_github_config: &GithubConfig,
+    existing_gitee_config: &GiteeConfig,
+) -> SyncConfig {
+    let mut gitee_config = existing_gitee_config.clone();
+    gitee_config.api_base = api_base.to_string();
+    gitee_config.token = token.to_string();
+    gitee_config.gist_description = gist_description.to_string();
+    let mut sync_config = SyncConfig {
+        provider: SyncProvider::Gitee,
+        owner: String::new(),
+        repo: String::new(),
+        branch: String::new(),
+        token: String::new(),
+        github_config: GithubConfig::default(),
+        gitee_config,
+    };
+    sync_config.github_config = existing_github_config.clone();
+    sync_config
+}
+
 fn test_github_connection(api_base: &str, token: &str) -> Result<String, String> {
     let url = format!("{}/gists?per_page=1", api_base.trim_end_matches('/'));
     let client = reqwest::blocking::Client::new();
@@ -512,22 +536,13 @@ impl ConfigTab for SyncTab {
                     .as_ref()
                     .map(|sync| sync.gitee_config.clone())
                     .unwrap_or_default();
-                crate::snippet::config::SyncConfig {
-                    provider: crate::snippet::config::SyncProvider::Gitee,
-                    owner: String::new(),
-                    repo: String::new(),
-                    branch: String::new(),
-                    token: String::new(),
-                    github_config: existing_github_config,
-                    gitee_config: crate::snippet::config::GiteeConfig {
-                        api_base,
-                        token,
-                        auto_sync: existing_gitee_config.auto_sync,
-                        sync_interval: existing_gitee_config.sync_interval,
-                        gist_id: existing_gitee_config.gist_id,
-                        gist_description: gist_desc,
-                    },
-                }
+                build_gitee_sync_config(
+                    &api_base,
+                    &token,
+                    &gist_desc,
+                    &existing_github_config,
+                    &existing_gitee_config,
+                )
             } else {
                 let token = sync_gh_token.text().to_string();
                 let gist_description = sync_gh_desc.text().to_string();
@@ -650,28 +665,24 @@ impl ConfigTab for SyncTab {
         let config = Config::load().unwrap_or_default();
 
         if let Some(sync_config) = &config.sync {
-            match sync_config.provider {
-                SyncProvider::Github => {
-                    self.provider_combo.set_active(Some(0));
-                    self.gh_token_entry.set_text(sync_config.github_token());
-                    let gist_description = if sync_config.github_config.gist_description.is_empty()
-                    {
-                        "CopyTimeTrayConfig"
-                    } else {
-                        &sync_config.github_config.gist_description
-                    };
-                    self.gh_gist_desc_entry.set_text(gist_description);
-                }
-                SyncProvider::Gitee => {
-                    self.provider_combo.set_active(Some(1));
-                    self.gitee_api_entry
-                        .set_text(&sync_config.gitee_config.api_base);
-                    self.gitee_token_entry
-                        .set_text(&sync_config.gitee_config.token);
-                    self.gitee_gist_desc_entry
-                        .set_text(&sync_config.gitee_config.gist_description);
-                }
-            }
+            self.gh_token_entry.set_text(sync_config.github_token());
+            let github_description = if sync_config.github_config.gist_description.is_empty() {
+                "CopyTimeTrayConfig"
+            } else {
+                &sync_config.github_config.gist_description
+            };
+            self.gh_gist_desc_entry.set_text(github_description);
+            self.gitee_api_entry
+                .set_text(&sync_config.gitee_config.api_base);
+            self.gitee_token_entry
+                .set_text(&sync_config.gitee_config.token);
+            self.gitee_gist_desc_entry
+                .set_text(&sync_config.gitee_config.gist_description);
+            self.provider_combo
+                .set_active(Some(match sync_config.provider {
+                    SyncProvider::Github => 0,
+                    SyncProvider::Gitee => 1,
+                }));
         }
 
         Self::apply_provider_visibility(
@@ -689,7 +700,10 @@ impl ConfigTab for SyncTab {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_github_sync_config, validate_github_fields, ManualSyncAction, SyncTab};
+    use super::{
+        build_gitee_sync_config, build_github_sync_config, validate_github_fields,
+        ManualSyncAction, SyncTab,
+    };
     use crate::snippet::config::{GiteeConfig, GithubConfig};
 
     #[test]
@@ -730,6 +744,31 @@ mod tests {
             validate_github_fields("token", ""),
             Err("请填写 Gist 名称".to_string())
         );
+    }
+
+    #[test]
+    fn gitee_sync_config_preserves_existing_github_gist_binding() {
+        let existing_github = GithubConfig {
+            api_base: "https://github.example/api/v3".to_string(),
+            token: "github-token".to_string(),
+            gist_id: Some("github-gist".to_string()),
+            gist_description: "Existing GitHub Gist".to_string(),
+        };
+        let existing_gitee = GiteeConfig::default();
+
+        let sync = build_gitee_sync_config(
+            "https://gitee.example/api/v5",
+            "gitee-token",
+            "Gitee Gist",
+            &existing_github,
+            &existing_gitee,
+        );
+
+        assert_eq!(sync.provider, crate::snippet::config::SyncProvider::Gitee);
+        assert_eq!(sync.github_config.api_base, "https://github.example/api/v3");
+        assert_eq!(sync.github_config.token, "github-token");
+        assert_eq!(sync.github_config.gist_id.as_deref(), Some("github-gist"));
+        assert_eq!(sync.github_config.gist_description, "Existing GitHub Gist");
     }
 
     #[test]

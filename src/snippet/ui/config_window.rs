@@ -1,6 +1,6 @@
 use super::tabs::sync_tab::build_github_sync_config;
 use super::tabs::{about_tab, general_tab, sync_tab, ConfigTab};
-use crate::snippet::config::{Config, GiteeConfig, SyncConfig, SyncProvider};
+use crate::snippet::config::{Config, SyncConfig, SyncProvider};
 use gtk::prelude::*;
 
 pub struct ConfigWindow {
@@ -118,22 +118,13 @@ impl ConfigWindow {
                     .as_ref()
                     .map(|sync| sync.gitee_config.clone())
                     .unwrap_or_default();
-                SyncConfig {
-                    provider: SyncProvider::Gitee,
-                    owner: String::new(),
-                    repo: String::new(),
-                    branch: String::new(),
-                    token: String::new(),
-                    github_config: existing_github_config,
-                    gitee_config: GiteeConfig {
-                        api_base: dialog.sync_tab.gitee_api_entry.text().to_string(),
-                        token: dialog.sync_tab.gitee_token_entry.text().to_string(),
-                        auto_sync: existing_gitee_config.auto_sync,
-                        sync_interval: existing_gitee_config.sync_interval,
-                        gist_id: existing_gitee_config.gist_id,
-                        gist_description: dialog.sync_tab.gitee_gist_desc_entry.text().to_string(),
-                    },
-                }
+                sync_tab::build_gitee_sync_config(
+                    dialog.sync_tab.gitee_api_entry.text().as_str(),
+                    dialog.sync_tab.gitee_token_entry.text().as_str(),
+                    dialog.sync_tab.gitee_gist_desc_entry.text().as_str(),
+                    &existing_github_config,
+                    &existing_gitee_config,
+                )
             }
         })
     }
