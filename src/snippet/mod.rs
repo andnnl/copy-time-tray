@@ -7,6 +7,7 @@ pub mod store;
 pub mod sync;
 pub mod ui;
 
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -53,6 +54,17 @@ fn set_gitee_gist_id(config: &mut Config, id: String) {
 
 fn snippets_for_push(_sync_config: &config::SyncConfig, store: &SnippetStore) -> Vec<Snippet> {
     store.list().iter().cloned().collect()
+}
+
+fn should_retry(error: &sync::SyncError) -> bool {
+    !error.is_authentication_failure()
+}
+
+fn mark_scheduled_push_synced(store_path: &Path, snippets: &[Snippet]) -> Result<(), String> {
+    let ids: Vec<String> = snippets.iter().map(|snippet| snippet.id.clone()).collect();
+    let mut store =
+        SnippetStore::new(store_path.to_path_buf()).map_err(|error| error.to_string())?;
+    store.mark_synced(&ids).map_err(|error| error.to_string())
 }
 
 pub struct SnippetManager {
@@ -217,6 +229,9 @@ impl SnippetManager {
                 }
                 Err(e) => {
                     eprintln!("[SYNC] Push attempt {} failed: {}", attempt + 1, e);
+                    if !should_retry(&e) {
+                        return Err(e.to_string());
+                    }
                     let backoff = Duration::from_secs(INITIAL_BACKOFF_SECS * (1 << attempt));
                     log::warn!(
                         "do_push attempt {}/{} failed: {}, retrying in {:?}",
@@ -355,10 +370,23 @@ impl SnippetManager {
                                 }
                             }
                         }
+                        if let Err(error) = mark_scheduled_push_synced(&store_path, &pending) {
+                            eprintln!(
+                                "[SYNC] schedule_push: failed to mark snippets as synced: {}",
+                                error
+                            );
+                            log::warn!(
+                                "schedule_push: failed to mark snippets as synced: {}",
+                                error
+                            );
+                        }
                         return;
                     }
                     Err(e) => {
                         eprintln!("[SYNC] schedule_push attempt {} failed: {}", attempt + 1, e);
+                        if !should_retry(&e) {
+                            return;
+                        }
                         let backoff = Duration::from_secs(INITIAL_BACKOFF_SECS * (1 << attempt));
                         log::warn!(
                             "schedule_push attempt {}/{} failed: {}, retrying in {:?}",
@@ -399,6 +427,9 @@ impl SnippetManager {
                     return Ok(());
                 }
                 Err(e) => {
+                    if !should_retry(&e) {
+                        return Err(e.to_string());
+                    }
                     let backoff = Duration::from_secs(INITIAL_BACKOFF_SECS * (1 << attempt));
                     log::warn!(
                         "do_pull attempt {}/{} failed: {}, retrying in {:?}",
@@ -484,6 +515,42 @@ mod tests {
         missing_sync.sync = None;
         assert!(!should_auto_sync(&missing_sync));
     }
+    #[test]
+    fn test_authentication_error_is_not_retryable() {
+        assert!(!should_retry(&sync::SyncError::Auth(
+            "GitHub authentication or authorization failed (403)".into()
+        )));
+        assert!(should_retry(&sync::SyncError::Http(
+            "temporary network error".into()
+        )));
+    }
+
+    #[test]
+    fn test_scheduled_push_success_marks_all_tree_ids_synced_in_reopened_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("snippets.json");
+        let mut store = SnippetStore::new(store_path.clone()).unwrap();
+
+        let mut already_synced = Snippet::new_snippet("synced".into(), "remote".into(), None);
+        already_synced.id = "synced-id".into();
+        already_synced.synced = true;
+        store.add(already_synced).unwrap();
+
+        let mut pending = Snippet::new_snippet("pending".into(), "local".into(), None);
+        pending.id = "pending-id".into();
+        pending.synced = false;
+        store.add(pending).unwrap();
+
+        let tree = store.list().to_vec();
+        drop(store);
+
+        mark_scheduled_push_synced(&store_path, &tree).unwrap();
+
+        let reloaded = SnippetStore::new(store_path).unwrap();
+        assert!(reloaded.get("synced-id").unwrap().synced);
+        assert!(reloaded.get("pending-id").unwrap().synced);
+    }
+
     #[test]
     fn test_set_github_gist_id_does_not_change_gitee_id() {
         let mut config = gitee_config_with_id(Some("gitee-gist"));

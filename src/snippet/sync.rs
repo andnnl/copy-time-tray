@@ -13,15 +13,34 @@ use crate::snippet::model::Snippet;
 
 #[derive(Debug)]
 pub enum SyncError {
+    Auth(String),
     Http(String),
     Parse(String),
     Config(String),
     Store(String),
 }
 
+impl SyncError {
+    pub fn is_authentication_failure(&self) -> bool {
+        matches!(self, Self::Auth(_))
+    }
+}
+
+impl From<GithubError> for SyncError {
+    fn from(error: GithubError) -> Self {
+        match error {
+            GithubError::Auth(status) => Self::Auth(format!(
+                "GitHub authentication or authorization failed ({status})"
+            )),
+            error => Self::Http(error.to_string()),
+        }
+    }
+}
+
 impl std::fmt::Display for SyncError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            SyncError::Auth(e) => write!(f, "Authentication error: {e}"),
             SyncError::Http(e) => write!(f, "HTTP error: {e}"),
             SyncError::Parse(e) => write!(f, "Parse error: {e}"),
             SyncError::Config(e) => write!(f, "Config error: {e}"),
@@ -115,10 +134,18 @@ fn pull_from_gitee_gist(config: &SyncConfig) -> Result<Vec<Snippet>, SyncError> 
         .get("tree.json")
         .ok_or_else(|| SyncError::Parse("tree.json not found in gist".into()))?;
     let tree_content = tree_file.content.as_deref().unwrap_or("");
+    decode_gitee_tree(tree_content)
+}
+
+fn decode_gitee_tree(tree_content: &str) -> Result<Vec<Snippet>, SyncError> {
     if tree_content.trim().is_empty() {
-        return Ok(Vec::new());
+        return Err(SyncError::Parse("tree.json is empty".into()));
     }
     decode_tree(tree_content)
+}
+
+fn github_error(error: GithubError) -> SyncError {
+    error.into()
 }
 
 fn pull_from_github_gist(config: &SyncConfig) -> Result<Vec<Snippet>, SyncError> {
@@ -127,9 +154,7 @@ fn pull_from_github_gist(config: &SyncConfig) -> Result<Vec<Snippet>, SyncError>
         None => return Ok(Vec::new()),
     };
     let client = github_client(config);
-    let gist = client
-        .get_gist(gist_id)
-        .map_err(|error| SyncError::Http(error.to_string()))?;
+    let gist = client.get_gist(gist_id).map_err(github_error)?;
     let tree_file = gist
         .files
         .get("tree.json")
@@ -139,11 +164,7 @@ fn pull_from_github_gist(config: &SyncConfig) -> Result<Vec<Snippet>, SyncError>
             .raw_url
             .as_deref()
             .ok_or_else(|| SyncError::Parse("truncated tree.json has no raw_url".into()))?;
-        Some(
-            client
-                .fetch_raw(raw_url)
-                .map_err(|error| SyncError::Http(error.to_string()))?,
-        )
+        Some(client.fetch_raw(raw_url).map_err(github_error)?)
     } else {
         None
     };
@@ -209,13 +230,13 @@ fn push_to_github_gist(config: &SyncConfig, snippets: &[Snippet]) -> Result<Stri
             Err(GithubError::NotFound) => {
                 select_or_create_github_gist(&client, github_config, &tree_json)?
             }
-            Err(error) => return Err(SyncError::Http(error.to_string())),
+            Err(error) => return Err(github_error(error)),
         },
         None => select_or_create_github_gist(&client, github_config, &tree_json)?,
     };
     client
         .update_gist(&gist_id, &tree_json)
-        .map_err(|error| SyncError::Http(error.to_string()))?;
+        .map_err(github_error)?;
     Ok(gist_id)
 }
 
@@ -224,16 +245,14 @@ fn select_or_create_github_gist(
     config: &crate::snippet::config::GithubConfig,
     tree_json: &str,
 ) -> Result<String, SyncError> {
-    let gists = client
-        .list_gists()
-        .map_err(|error| SyncError::Http(error.to_string()))?;
+    let gists = client.list_gists().map_err(github_error)?;
     if let Some(id) = find_reusable_gist_id(&gists, &config.gist_description) {
         return Ok(id);
     }
     client
         .create_private_gist(&config.gist_description, tree_json)
         .map(|gist| gist.id)
-        .map_err(|error| SyncError::Http(error.to_string()))
+        .map_err(github_error)
 }
 
 fn github_client(config: &SyncConfig) -> GithubClient {
@@ -304,6 +323,22 @@ mod tests {
         let config = SyncConfig::github(crate::snippet::config::GithubConfig::default());
 
         assert_eq!(github_gist_id_for_pull(&config), None);
+    }
+
+    #[test]
+    fn test_auth_sync_error_is_not_retryable() {
+        assert!(
+            SyncError::Auth("GitHub authentication or authorization failed (401)".into())
+                .is_authentication_failure()
+        );
+    }
+
+    #[test]
+    fn test_gitee_empty_tree_is_parse_error() {
+        assert!(matches!(
+            decode_gitee_tree(" \n\t "),
+            Err(SyncError::Parse(_))
+        ));
     }
 
     #[test]
