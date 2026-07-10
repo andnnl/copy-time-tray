@@ -33,10 +33,21 @@ const MAX_RETRIES: u32 = 3;
 /// Initial backoff delay in seconds (doubles each retry: 1s, 2s, 4s)
 const INITIAL_BACKOFF_SECS: u64 = 1;
 
-fn set_gitee_gist_id(config: &mut Config, id: String) {
+fn set_gist_id(config: &mut Config, provider: &config::SyncProvider, id: String) {
     if let Some(ref mut sync) = config.sync {
-        sync.gitee_config.gist_id = Some(id);
+        match provider {
+            config::SyncProvider::Github => sync.github_config.gist_id = Some(id),
+            config::SyncProvider::Gitee => sync.gitee_config.gist_id = Some(id),
+        }
     }
+}
+
+fn set_github_gist_id(config: &mut Config, id: String) {
+    set_gist_id(config, &config::SyncProvider::Github, id);
+}
+
+fn set_gitee_gist_id(config: &mut Config, id: String) {
+    set_gist_id(config, &config::SyncProvider::Gitee, id);
 }
 
 fn snippets_for_push(sync_config: &config::SyncConfig, store: &SnippetStore) -> Vec<Snippet> {
@@ -161,12 +172,16 @@ impl SnippetManager {
         Ok(())
     }
 
-    fn apply_gitee_gist_id(&mut self, id: String) -> Result<(), String> {
+    fn apply_gist_id(&mut self, provider: &config::SyncProvider, id: String) -> Result<(), String> {
         let mut cfg = Config::load().map_err(|e| e.to_string())?;
-        set_gitee_gist_id(&mut cfg, id.clone());
+        set_gist_id(&mut cfg, provider, id.clone());
         cfg.save().map_err(|e| e.to_string())?;
-        set_gitee_gist_id(&mut self.config, id);
+        set_gist_id(&mut self.config, provider, id);
         Ok(())
+    }
+
+    fn apply_gitee_gist_id(&mut self, id: String) -> Result<(), String> {
+        self.apply_gist_id(&config::SyncProvider::Gitee, id)
     }
 
     pub fn do_push(&mut self) -> Result<(), String> {
@@ -442,7 +457,7 @@ impl SnippetManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use config::{GiteeConfig, SyncConfig, SyncProvider};
+    use config::{GiteeConfig, GithubConfig, SyncConfig, SyncProvider};
 
     fn gitee_config_with_id(id: Option<&str>) -> Config {
         Config {
@@ -452,6 +467,7 @@ mod tests {
                 repo: String::new(),
                 branch: String::new(),
                 token: String::new(),
+                github_config: GithubConfig::default(),
                 gitee_config: GiteeConfig {
                     gist_id: id.map(String::from),
                     ..GiteeConfig::default()
@@ -480,6 +496,29 @@ mod tests {
         missing_sync.sync = None;
         assert!(!should_auto_sync(&missing_sync));
     }
+    #[test]
+    fn test_set_github_gist_id_does_not_change_gitee_id() {
+        let mut config = gitee_config_with_id(Some("gitee-gist"));
+
+        set_github_gist_id(&mut config, "github-gist".into());
+
+        let sync = config.sync.unwrap();
+        assert_eq!(sync.github_config.gist_id.as_deref(), Some("github-gist"));
+        assert_eq!(sync.gitee_config.gist_id.as_deref(), Some("gitee-gist"));
+    }
+
+    #[test]
+    fn test_set_gitee_gist_id_does_not_change_github_id() {
+        let mut config = gitee_config_with_id(Some("gitee-gist"));
+        set_github_gist_id(&mut config, "github-gist".into());
+
+        set_gitee_gist_id(&mut config, "new-gitee-gist".into());
+
+        let sync = config.sync.unwrap();
+        assert_eq!(sync.github_config.gist_id.as_deref(), Some("github-gist"));
+        assert_eq!(sync.gitee_config.gist_id.as_deref(), Some("new-gitee-gist"));
+    }
+
     #[test]
     fn test_set_gitee_gist_id_replaces_stale_runtime_id() {
         let mut config = gitee_config_with_id(Some("old-gist"));

@@ -480,6 +480,7 @@ impl ConfigTab for SyncTab {
                     repo: String::new(),
                     branch: String::new(),
                     token: String::new(),
+                    github_config: crate::snippet::config::GithubConfig::default(),
                     gitee_config: crate::snippet::config::GiteeConfig {
                         api_base,
                         token,
@@ -507,6 +508,7 @@ impl ConfigTab for SyncTab {
                     repo,
                     branch,
                     token,
+                    github_config: crate::snippet::config::GithubConfig::default(),
                     gitee_config: crate::snippet::config::GiteeConfig::default(),
                 }
             };

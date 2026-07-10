@@ -567,6 +567,7 @@ updated: "{}"
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::snippet::config::GithubConfig;
     use std::sync::Mutex;
 
     thread_local! {
@@ -635,6 +636,7 @@ mod tests {
             repo: "test-repo".into(),
             branch: "main".into(),
             token: "test-token".into(),
+            github_config: GithubConfig::default(),
             gitee_config: GiteeConfig::default(),
         }
     }
@@ -654,6 +656,7 @@ mod tests {
             repo: "gitee-repo".into(),
             branch: "master".into(),
             token: "token".into(),
+            github_config: GithubConfig::default(),
             gitee_config: GiteeConfig::default(),
         };
         let url = base_url(&config);
@@ -676,6 +679,7 @@ mod tests {
             repo: "repo".into(),
             branch: "main".into(),
             token: "gitee-token".into(),
+            github_config: GithubConfig::default(),
             gitee_config: GiteeConfig::default(),
         };
         let headers = auth_headers(&config);

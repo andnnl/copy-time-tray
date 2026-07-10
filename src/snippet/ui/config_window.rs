@@ -1,5 +1,5 @@
 use super::tabs::{about_tab, general_tab, sync_tab, ConfigTab};
-use crate::snippet::config::{Config, GiteeConfig, SyncConfig, SyncProvider};
+use crate::snippet::config::{Config, GiteeConfig, GithubConfig, SyncConfig, SyncProvider};
 use gtk::prelude::*;
 
 pub struct ConfigWindow {
@@ -100,6 +100,7 @@ impl ConfigWindow {
             repo: dialog.sync_tab.repo_entry.text().to_string(),
             branch: dialog.sync_tab.branch_entry.text().to_string(),
             token: dialog.sync_tab.gh_token_entry.text().to_string(),
+            github_config: GithubConfig::default(),
             gitee_config: GiteeConfig {
                 api_base: dialog.sync_tab.gitee_api_entry.text().to_string(),
                 token: dialog.sync_tab.gitee_token_entry.text().to_string(),
