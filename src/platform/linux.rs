@@ -13,6 +13,25 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static JSON_DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
 
+fn reset_json_dialog_open() {
+    JSON_DIALOG_OPEN.store(false, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{reset_json_dialog_open, JSON_DIALOG_OPEN};
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn destroying_the_json_dialog_releases_the_single_window_guard() {
+        JSON_DIALOG_OPEN.store(true, Ordering::SeqCst);
+
+        reset_json_dialog_open();
+
+        assert!(!JSON_DIALOG_OPEN.load(Ordering::SeqCst));
+    }
+}
+
 fn copy_to_clipboard(text: &str) {
     let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
     clipboard.set_text(text);
@@ -38,8 +57,12 @@ fn show_json_formatter() {
     dialog.set_position(WindowPosition::Center);
     dialog.set_resizable(true);
 
+    dialog.connect_delete_event(|_, _| {
+        reset_json_dialog_open();
+        glib::Propagation::Proceed
+    });
     dialog.connect_destroy(|_| {
-        JSON_DIALOG_OPEN.store(false, Ordering::SeqCst);
+        reset_json_dialog_open();
     });
 
     let content = dialog.content_area();
