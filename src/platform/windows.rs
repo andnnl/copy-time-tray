@@ -1,8 +1,11 @@
 use crate::app::{send_refresh_to_search, UiCommand};
+use crate::json_formatter::{format_json, JsonFormat};
 use crate::utilities::{generate_md5, generate_password, get_time_text};
 use arboard::Clipboard;
+use eframe::egui;
 use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use notify_rust::Notification;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tray_icon::{TrayIcon, TrayIconBuilder};
 
@@ -18,6 +21,154 @@ fn copy_to_clipboard(text: &str) {
 
 fn copy_time(format: &str) {
     copy_to_clipboard(&get_time_text(format));
+}
+
+struct JsonFormatterApp {
+    input: String,
+    output: String,
+    format: JsonFormat,
+    error: Option<String>,
+    status: Option<String>,
+}
+
+impl Default for JsonFormatterApp {
+    fn default() -> Self {
+        Self {
+            input: String::new(),
+            output: String::new(),
+            format: JsonFormat::PrettyFourSpaces,
+            error: None,
+            status: None,
+        }
+    }
+}
+
+static JSON_WINDOW_OPEN: AtomicBool = AtomicBool::new(false);
+
+struct JsonWindowGuard;
+
+impl Drop for JsonWindowGuard {
+    fn drop(&mut self) {
+        JSON_WINDOW_OPEN.store(false, Ordering::SeqCst);
+    }
+}
+
+fn launch_json_formatter() {
+    if JSON_WINDOW_OPEN
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    std::thread::spawn(|| {
+        let _guard = JsonWindowGuard;
+        let native_options = eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default().with_inner_size([1000.0, 700.0]),
+            ..Default::default()
+        };
+        let _ = eframe::run_native(
+            "JSON 格式化工具",
+            native_options,
+            Box::new(|_cc| Ok(Box::new(JsonFormatterApp::default()))),
+        );
+    });
+}
+
+impl eframe::App for JsonFormatterApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let mut format_idx = JsonFormat::ALL
+                .iter()
+                .position(|&f| f == self.format)
+                .unwrap_or(0);
+            egui::ComboBox::from_label("格式")
+                .selected_text(self.format.label())
+                .show_ui(ui, |ui| {
+                    for (i, format) in JsonFormat::ALL.iter().enumerate() {
+                        ui.selectable_value(&mut format_idx, i, format.label());
+                    }
+                });
+            self.format = JsonFormat::ALL[format_idx];
+
+            let [left_ui, right_ui] = &mut ui.columns(2);
+
+            left_ui.heading("输入");
+            left_ui.add_sized(
+                [0.0, 300.0],
+                egui::TextEdit::multiline(&mut self.input).desired_width(f32::INFINITY),
+            );
+
+            right_ui.heading("输出");
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(right_ui, |ui| {
+                    ui.add_sized(
+                        [0.0, 300.0],
+                        egui::TextEdit::multiline(&mut self.output)
+                            .interactive(false)
+                            .desired_width(f32::INFINITY),
+                    );
+                });
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("从剪贴板粘贴").clicked() {
+                    if let Ok(mut clipboard) = Clipboard::new() {
+                        if let Ok(text) = clipboard.get_text() {
+                            self.input = text;
+                            self.error = None;
+                            self.status = None;
+                        } else {
+                            self.error = Some("无法读取剪贴板文本".to_string());
+                            self.status = None;
+                        }
+                    } else {
+                        self.error = Some("无法打开剪贴板".to_string());
+                        self.status = None;
+                    }
+                }
+                if ui.button("格式化").clicked() {
+                    match format_json(&self.input, self.format) {
+                        Ok(output) => {
+                            self.output = output;
+                            self.error = None;
+                            self.status = Some("格式化成功".to_string());
+                        }
+                        Err(e) => {
+                            self.error = Some(e.to_string());
+                            self.status = None;
+                        }
+                    }
+                }
+                let copy_enabled = !self.output.is_empty();
+                ui.add_enabled_ui(copy_enabled, |ui| {
+                    if ui.button("复制结果").clicked() {
+                        if let Ok(mut clipboard) = Clipboard::new() {
+                            if clipboard.set_text(&self.output).is_ok() {
+                                self.error = None;
+                                self.status = Some("已复制格式化结果".to_string());
+                            } else {
+                                self.error = Some("无法设置剪贴板文本".to_string());
+                                self.status = None;
+                            }
+                        } else {
+                            self.error = Some("无法打开剪贴板".to_string());
+                            self.status = None;
+                        }
+                    }
+                });
+                if ui.button("关闭").clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+
+            if let Some(ref error) = self.error {
+                ui.colored_label(egui::Color32::RED, error);
+            } else if let Some(ref status) = self.status {
+                ui.label(status);
+            }
+        });
+    }
 }
 
 fn create_icon_rgba() -> Vec<u8> {
@@ -64,11 +215,14 @@ pub fn main(
     let full_item = MenuItem::with_id(full_id.clone(), "复制完整时间", true, None);
     let date_item = MenuItem::with_id(date_id.clone(), "复制日期", true, None);
     let compact_item = MenuItem::with_id(compact_id.clone(), "复制纯数字", true, None);
+    let json_formatter_id = muda::MenuId::new("open_json_formatter");
+    let json_formatter_item = MenuItem::with_id(json_formatter_id.clone(), "JSON", true, None);
     menu.append_items(&[
         &full_item,
         &date_item,
         &compact_item,
         &PredefinedMenuItem::separator(),
+        &json_formatter_item,
     ])
     .unwrap();
 
@@ -154,6 +308,7 @@ pub fn main(
                         send_refresh_to_search();
                         let _ = cmd_tx.send(UiCommand::Show);
                     }
+                    "open_json_formatter" => launch_json_formatter(),
                     "quit" => {
                         running_for_thread.store(false, std::sync::atomic::Ordering::SeqCst);
                     }
