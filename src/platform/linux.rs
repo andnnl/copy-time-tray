@@ -1,10 +1,17 @@
 use crate::app::MANAGER;
+use crate::json_formatter::{format_json, JsonFormat};
 use crate::snippet::ui::UiCommand;
 use crate::utilities::{generate_md5, generate_password, get_time_text};
 use gtk::prelude::*;
-use gtk::{glib, Menu, MenuItem, SeparatorMenuItem};
+use gtk::{
+    glib, Button, ComboBoxText, Dialog, Label, Menu, MenuItem, Orientation, Paned, ScrolledWindow,
+    SeparatorMenuItem, TextView, WindowPosition,
+};
 use libappindicator::{AppIndicator, AppIndicatorStatus};
 use notify_rust::Notification;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static JSON_DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
 
 fn copy_to_clipboard(text: &str) {
     let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
@@ -18,6 +25,149 @@ fn copy_to_clipboard(text: &str) {
 
 fn copy_time(format: &str) {
     copy_to_clipboard(&get_time_text(format));
+}
+
+fn show_json_formatter() {
+    if JSON_DIALOG_OPEN.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let dialog = Dialog::new();
+    dialog.set_title("JSON 格式化");
+    dialog.set_default_size(900, 600);
+    dialog.set_position(WindowPosition::Center);
+    dialog.set_resizable(true);
+
+    dialog.connect_destroy(|_| {
+        JSON_DIALOG_OPEN.store(false, Ordering::SeqCst);
+    });
+
+    let content = dialog.content_area();
+    content.set_spacing(12);
+    content.set_margin_top(12);
+    content.set_margin_bottom(12);
+    content.set_margin_start(12);
+    content.set_margin_end(12);
+
+    let format_selector = ComboBoxText::new();
+    for format in JsonFormat::ALL {
+        format_selector.append_text(format.label());
+    }
+    format_selector.set_active(Some(0));
+    content.pack_start(&format_selector, false, false, 0);
+
+    let input_view = TextView::new();
+    let input_buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
+    input_view.set_buffer(Some(&input_buffer));
+    input_view.set_wrap_mode(gtk::WrapMode::WordChar);
+    let output_view = TextView::new();
+    let output_buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
+    output_view.set_buffer(Some(&output_buffer));
+    output_view.set_editable(false);
+    output_view.set_cursor_visible(false);
+    output_view.set_wrap_mode(gtk::WrapMode::WordChar);
+
+    let input_column = gtk::Box::new(Orientation::Vertical, 6);
+    input_column.pack_start(&Label::new(Some("输入 JSON")), false, false, 0);
+    let input_scroll = ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+    input_scroll.add(&input_view);
+    input_column.pack_start(&input_scroll, true, true, 0);
+
+    let output_column = gtk::Box::new(Orientation::Vertical, 6);
+    output_column.pack_start(&Label::new(Some("格式化结果")), false, false, 0);
+    let output_scroll = ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+    output_scroll.add(&output_view);
+    output_column.pack_start(&output_scroll, true, true, 0);
+
+    let columns = Paned::new(Orientation::Horizontal);
+    columns.pack1(&input_column, true, false);
+    columns.pack2(&output_column, true, false);
+    content.pack_start(&columns, true, true, 0);
+
+    let status_label = Label::new(None);
+    status_label.set_xalign(0.0);
+    status_label.set_line_wrap(true);
+    content.pack_start(&status_label, false, false, 0);
+
+    let button_row = gtk::Box::new(Orientation::Horizontal, 6);
+    let paste_button = Button::with_label("从剪贴板粘贴");
+    let format_button = Button::with_label("格式化");
+    let copy_button = Button::with_label("复制结果");
+    copy_button.set_sensitive(false);
+    let close_button = Button::with_label("关闭");
+    button_row.pack_start(&paste_button, false, false, 0);
+    button_row.pack_start(&format_button, false, false, 0);
+    button_row.pack_start(&copy_button, false, false, 0);
+    button_row.pack_end(&close_button, false, false, 0);
+    content.pack_start(&button_row, false, false, 0);
+
+    paste_button.connect_clicked({
+        let input_buffer = input_buffer.clone();
+        let status_label = status_label.clone();
+        move |_| {
+            let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
+            let input_buffer = input_buffer.clone();
+            let status_label = status_label.clone();
+            clipboard.request_text(move |_, text| match text {
+                Some(text) => {
+                    input_buffer.set_text(text);
+                    status_label.set_text("已从剪贴板载入输入");
+                }
+                None => status_label.set_text("剪贴板中没有可读取的文本"),
+            });
+        }
+    });
+
+    format_button.connect_clicked(glib::clone!(
+        @strong format_selector,
+        @strong input_buffer,
+        @strong output_buffer,
+        @strong status_label,
+        @strong copy_button => move |_| {
+            let input = input_buffer
+                .text(&input_buffer.start_iter(), &input_buffer.end_iter(), true)
+                .unwrap_or_default();
+            let format = format_selector
+                .active()
+                .and_then(|index| JsonFormat::ALL.get(index as usize).copied())
+                .unwrap_or_default();
+
+            match format_json(&input, format) {
+                Ok(output) => {
+                    output_buffer.set_text(&output);
+                    copy_button.set_sensitive(true);
+                    status_label.set_text("格式化成功");
+                }
+                Err(error) => status_label.set_text(&error.to_string()),
+            }
+        }
+    ));
+
+    copy_button.connect_clicked({
+        let output_buffer = output_buffer.clone();
+        let status_label = status_label.clone();
+        move |_| {
+            let output = output_buffer
+                .text(&output_buffer.start_iter(), &output_buffer.end_iter(), true)
+                .unwrap_or_default();
+            if output.is_empty() {
+                status_label.set_text("没有可复制的格式化结果");
+                return;
+            }
+
+            let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
+            clipboard.set_text(&output);
+            clipboard.store();
+            status_label.set_text("已复制格式化结果");
+        }
+    });
+
+    close_button.connect_clicked({
+        let dialog = dialog.clone();
+        move |_| dialog.close()
+    });
+
+    dialog.show_all();
 }
 
 pub fn main(
@@ -125,6 +275,10 @@ pub fn main(
     md5_menu.append(&md5_32_item);
 
     menu.append(&md5_item);
+
+    let json_item = MenuItem::with_label("JSON");
+    json_item.connect_activate(|_| show_json_formatter());
+    menu.append(&json_item);
 
     menu.append(&SeparatorMenuItem::new());
 
