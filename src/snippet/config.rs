@@ -68,10 +68,16 @@ pub struct GeneralConfig {
     pub notify_on_failure: bool,
     #[serde(default = "default_true")]
     pub notify_on_create: bool,
+    #[serde(default = "default_snippet_hotkey")]
+    pub snippet_hotkey: String,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_snippet_hotkey() -> String {
+    "Ctrl+Shift+S".to_string()
 }
 
 impl Default for GeneralConfig {
@@ -82,6 +88,7 @@ impl Default for GeneralConfig {
             notify_on_success: true,
             notify_on_failure: true,
             notify_on_create: true,
+            snippet_hotkey: default_snippet_hotkey(),
         }
     }
 }
@@ -407,6 +414,28 @@ sync:
         assert!(config.notify_on_success);
         assert!(config.notify_on_failure);
         assert!(config.notify_on_create);
+    }
+
+    #[test]
+    fn legacy_general_config_uses_default_snippet_hotkey() {
+        let yaml = r#"
+sync: null
+general:
+  auto_sync: true
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.general.snippet_hotkey, "Ctrl+Shift+S");
+    }
+
+    #[test]
+    fn snippet_hotkey_round_trips_through_yaml() {
+        let mut config = Config::default();
+        config.general.snippet_hotkey = "Alt+F8".to_string();
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let restored: Config = serde_yaml::from_str(&yaml).unwrap();
+
+        assert_eq!(restored.general.snippet_hotkey, "Alt+F8");
     }
 
     #[test]

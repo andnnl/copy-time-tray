@@ -1,13 +1,24 @@
-use crate::app::{send_refresh_to_search, UiCommand};
-use crate::json_formatter::{format_json, JsonFormat};
+use crate::app::{apply_config_with_hotkey, send_refresh_to_search, UiCommand};
+use crate::hotkey::{
+    capture_shortcut, CaptureResult, HotkeyError, HotkeySettingsState, HotkeySettingsStatus,
+    Shortcut,
+};
+use crate::json_formatter::{
+    format_json, json_editor_height, json_formatter_min_window_height, JsonFormat,
+};
+use crate::menu_order::{windows_menu_order, MenuEntry};
+use crate::snippet::config::Config;
 use crate::utilities::{generate_md5, generate_password, get_time_text};
 use arboard::Clipboard;
 use eframe::egui;
+use global_hotkey::hotkey::{Code, Modifiers};
 use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use notify_rust::Notification;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tray_icon::{TrayIcon, TrayIconBuilder};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LWIN, VK_RWIN};
 
 fn copy_to_clipboard(text: &str) {
     if let Ok(mut clipboard) = Clipboard::new() {
@@ -63,7 +74,9 @@ fn launch_json_formatter() {
     std::thread::spawn(|| {
         let _guard = JsonWindowGuard;
         let native_options = eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default().with_inner_size([1000.0, 700.0]),
+            viewport: egui::ViewportBuilder::default()
+                .with_inner_size([1000.0, 700.0])
+                .with_min_inner_size([600.0, json_formatter_min_window_height()]),
             ..Default::default()
         };
         let _ = eframe::run_native(
@@ -90,25 +103,28 @@ impl eframe::App for JsonFormatterApp {
                 });
             self.format = JsonFormat::ALL[format_idx];
 
-            let [left_ui, right_ui] = &mut ui.columns(2);
+            let editor_height = json_editor_height(ui.available_height());
 
-            left_ui.heading("输入");
-            left_ui.add_sized(
-                [0.0, 300.0],
-                egui::TextEdit::multiline(&mut self.input).desired_width(f32::INFINITY),
-            );
+            ui.columns(2, |columns| {
+                columns[0].heading("输入");
+                columns[0].add_sized(
+                    [0.0, editor_height],
+                    egui::TextEdit::multiline(&mut self.input).desired_width(f32::INFINITY),
+                );
 
-            right_ui.heading("输出");
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(right_ui, |ui| {
-                    ui.add_sized(
-                        [0.0, 300.0],
-                        egui::TextEdit::multiline(&mut self.output)
-                            .interactive(false)
-                            .desired_width(f32::INFINITY),
-                    );
-                });
+                columns[1].heading("输出");
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .max_height(editor_height)
+                    .show(&mut columns[1], |ui| {
+                        ui.add_sized(
+                            [0.0, editor_height],
+                            egui::TextEdit::multiline(&mut self.output)
+                                .interactive(false)
+                                .desired_width(f32::INFINITY),
+                        );
+                    });
+            });
 
             ui.separator();
             ui.horizontal(|ui| {
@@ -171,6 +187,273 @@ impl eframe::App for JsonFormatterApp {
     }
 }
 
+type ConfigApplyRequest = (Config, crossbeam_channel::Sender<Result<(), String>>);
+
+static CONFIG_WINDOW_OPEN: AtomicBool = AtomicBool::new(false);
+
+struct ConfigWindowGuard;
+
+impl Drop for ConfigWindowGuard {
+    fn drop(&mut self) {
+        CONFIG_WINDOW_OPEN.store(false, Ordering::SeqCst);
+    }
+}
+
+struct HotkeySettingsApp {
+    config: Config,
+    state: HotkeySettingsState,
+    apply_tx: crossbeam_channel::Sender<ConfigApplyRequest>,
+}
+
+impl HotkeySettingsApp {
+    fn new(
+        config: Config,
+        current: Shortcut,
+        apply_tx: crossbeam_channel::Sender<ConfigApplyRequest>,
+    ) -> Self {
+        Self {
+            config,
+            state: HotkeySettingsState::new(current),
+            apply_tx,
+        }
+    }
+
+    fn process_capture_events(&mut self, ctx: &egui::Context) {
+        if !self.state.is_capturing() {
+            return;
+        }
+        let events = ctx.input(|input| input.events.clone());
+        for event in events {
+            let egui::Event::Key {
+                key,
+                pressed: true,
+                repeat: false,
+                modifiers,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            self.state.handle_capture(capture_from_egui(modifiers, key));
+            break;
+        }
+    }
+
+    fn apply(&mut self) -> bool {
+        let mut candidate_config = self.config.clone();
+        candidate_config.general.snippet_hotkey = self.state.candidate().to_string();
+        let (response_tx, response_rx) = crossbeam_channel::bounded(1);
+        if self.apply_tx.send((candidate_config, response_tx)).is_err() {
+            self.state.mark_failure("无法连接配置应用服务");
+            return false;
+        }
+        match response_rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(Ok(())) => {
+                self.state.mark_success();
+                true
+            }
+            Ok(Err(error)) => {
+                self.state.mark_failure(error);
+                false
+            }
+            Err(_) => {
+                self.state.mark_failure("配置应用超时，请重试");
+                false
+            }
+        }
+    }
+}
+
+impl eframe::App for HotkeySettingsApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.process_capture_events(ctx);
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("代码片段快捷键");
+            ui.label("F1-F12 可单独使用；其他按键必须包含 Ctrl、Alt 或 Win。");
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.label("当前绑定：");
+                ui.strong(self.state.current().to_string());
+            });
+            ui.horizontal(|ui| {
+                ui.label("候选绑定：");
+                ui.strong(self.state.candidate().to_string());
+            });
+            ui.add_space(8.0);
+            let capture_label = if self.state.is_capturing() {
+                "请按下快捷键（Esc 取消）"
+            } else {
+                "按下新快捷键"
+            };
+            if ui.button(capture_label).clicked() {
+                self.state.begin_capture();
+            }
+
+            if let Some(status) = self.state.status() {
+                ui.add_space(8.0);
+                match status {
+                    HotkeySettingsStatus::Success => {
+                        ui.colored_label(egui::Color32::DARK_GREEN, "绑定成功");
+                    }
+                    HotkeySettingsStatus::Error(message) => {
+                        ui.colored_label(egui::Color32::RED, message);
+                    }
+                }
+            }
+
+            ui.add_space(16.0);
+            ui.horizontal(|ui| {
+                if ui.button("保存").clicked() && self.apply() {
+                    let _ = Notification::new()
+                        .summary("配置已保存")
+                        .body(&format!("代码片段快捷键已绑定为 {}", self.state.current()))
+                        .show();
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                if ui.button("取消").clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+        });
+    }
+}
+
+fn launch_hotkey_settings(apply_tx: crossbeam_channel::Sender<ConfigApplyRequest>) {
+    if CONFIG_WINDOW_OPEN
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    std::thread::spawn(move || {
+        let _guard = ConfigWindowGuard;
+        let config = Config::load().unwrap_or_default();
+        let current = match config.general.snippet_hotkey.parse::<Shortcut>() {
+            Ok(shortcut) => shortcut,
+            Err(error) => {
+                let _ = Notification::new()
+                    .summary("快捷键配置无效")
+                    .body(&error.to_string())
+                    .show();
+                return;
+            }
+        };
+        let native_options = eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default()
+                .with_inner_size([460.0, 280.0])
+                .with_resizable(false),
+            ..Default::default()
+        };
+        let _ = eframe::run_native(
+            "Copy Time Tray - 配置",
+            native_options,
+            Box::new(move |_cc| Ok(Box::new(HotkeySettingsApp::new(config, current, apply_tx)))),
+        );
+    });
+}
+
+fn capture_from_egui(
+    modifiers: egui::Modifiers,
+    key: egui::Key,
+) -> Result<CaptureResult, HotkeyError> {
+    capture_shortcut(egui_modifiers(modifiers), egui_key_code(key)?)
+}
+
+fn egui_modifiers(modifiers: egui::Modifiers) -> Option<Modifiers> {
+    let mut result = Modifiers::empty();
+    if modifiers.ctrl {
+        result.insert(Modifiers::CONTROL);
+    }
+    if modifiers.alt {
+        result.insert(Modifiers::ALT);
+    }
+    if modifiers.shift {
+        result.insert(Modifiers::SHIFT);
+    }
+    if win_key_pressed() {
+        result.insert(Modifiers::SUPER);
+    }
+    (!result.is_empty()).then_some(result)
+}
+
+fn win_key_pressed() -> bool {
+    unsafe { GetAsyncKeyState(VK_LWIN as i32) < 0 || GetAsyncKeyState(VK_RWIN as i32) < 0 }
+}
+
+fn egui_key_code(key: egui::Key) -> Result<Option<Code>, HotkeyError> {
+    let code = match key {
+        egui::Key::Escape => Code::Escape,
+        egui::Key::Tab => Code::Tab,
+        egui::Key::Backspace => Code::Backspace,
+        egui::Key::Enter => Code::Enter,
+        egui::Key::Space => Code::Space,
+        egui::Key::Insert => Code::Insert,
+        egui::Key::Delete => Code::Delete,
+        egui::Key::Home => Code::Home,
+        egui::Key::End => Code::End,
+        egui::Key::PageUp => Code::PageUp,
+        egui::Key::PageDown => Code::PageDown,
+        egui::Key::ArrowUp => Code::ArrowUp,
+        egui::Key::ArrowDown => Code::ArrowDown,
+        egui::Key::ArrowLeft => Code::ArrowLeft,
+        egui::Key::ArrowRight => Code::ArrowRight,
+        egui::Key::Num0 => Code::Digit0,
+        egui::Key::Num1 => Code::Digit1,
+        egui::Key::Num2 => Code::Digit2,
+        egui::Key::Num3 => Code::Digit3,
+        egui::Key::Num4 => Code::Digit4,
+        egui::Key::Num5 => Code::Digit5,
+        egui::Key::Num6 => Code::Digit6,
+        egui::Key::Num7 => Code::Digit7,
+        egui::Key::Num8 => Code::Digit8,
+        egui::Key::Num9 => Code::Digit9,
+        egui::Key::A => Code::KeyA,
+        egui::Key::B => Code::KeyB,
+        egui::Key::C => Code::KeyC,
+        egui::Key::D => Code::KeyD,
+        egui::Key::E => Code::KeyE,
+        egui::Key::F => Code::KeyF,
+        egui::Key::G => Code::KeyG,
+        egui::Key::H => Code::KeyH,
+        egui::Key::I => Code::KeyI,
+        egui::Key::J => Code::KeyJ,
+        egui::Key::K => Code::KeyK,
+        egui::Key::L => Code::KeyL,
+        egui::Key::M => Code::KeyM,
+        egui::Key::N => Code::KeyN,
+        egui::Key::O => Code::KeyO,
+        egui::Key::P => Code::KeyP,
+        egui::Key::Q => Code::KeyQ,
+        egui::Key::R => Code::KeyR,
+        egui::Key::S => Code::KeyS,
+        egui::Key::T => Code::KeyT,
+        egui::Key::U => Code::KeyU,
+        egui::Key::V => Code::KeyV,
+        egui::Key::W => Code::KeyW,
+        egui::Key::X => Code::KeyX,
+        egui::Key::Y => Code::KeyY,
+        egui::Key::Z => Code::KeyZ,
+        egui::Key::F1 => Code::F1,
+        egui::Key::F2 => Code::F2,
+        egui::Key::F3 => Code::F3,
+        egui::Key::F4 => Code::F4,
+        egui::Key::F5 => Code::F5,
+        egui::Key::F6 => Code::F6,
+        egui::Key::F7 => Code::F7,
+        egui::Key::F8 => Code::F8,
+        egui::Key::F9 => Code::F9,
+        egui::Key::F10 => Code::F10,
+        egui::Key::F11 => Code::F11,
+        egui::Key::F12 => Code::F12,
+        unsupported => {
+            return Err(HotkeyError::InvalidSyntax(format!(
+                "暂不支持按键 {unsupported:?}"
+            )))
+        }
+    };
+    Ok(Some(code))
+}
+
 fn create_icon_rgba() -> Vec<u8> {
     let mut rgba = vec![0u8; 32 * 32 * 4];
     for y in 0..32 {
@@ -207,6 +490,7 @@ pub fn main(
     running: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let menu = Menu::new();
+    let (config_apply_tx, config_apply_rx) = crossbeam_channel::unbounded::<ConfigApplyRequest>();
 
     // 复制时间菜单项
     let full_id = muda::MenuId::new("full");
@@ -217,14 +501,6 @@ pub fn main(
     let compact_item = MenuItem::with_id(compact_id.clone(), "复制纯数字", true, None);
     let json_formatter_id = muda::MenuId::new("open_json_formatter");
     let json_formatter_item = MenuItem::with_id(json_formatter_id.clone(), "JSON", true, None);
-    menu.append_items(&[
-        &full_item,
-        &date_item,
-        &compact_item,
-        &PredefinedMenuItem::separator(),
-        &json_formatter_item,
-    ])
-    .unwrap();
 
     // 密码生成子菜单
     let password_submenu = Submenu::new("密码", true);
@@ -237,7 +513,6 @@ pub fn main(
     password_submenu
         .append_items(&[&pwd8_item, &pwd12_item, &pwd16_item])
         .unwrap();
-    menu.append(&password_submenu).unwrap();
 
     // MD5 子菜单
     let md5_submenu = Submenu::new("MD5", true);
@@ -248,23 +523,28 @@ pub fn main(
     md5_submenu
         .append_items(&[&md5_16_item, &md5_32_item])
         .unwrap();
-    menu.append(&md5_submenu).unwrap();
-
-    menu.append(&PredefinedMenuItem::separator()).unwrap();
 
     let config_id = muda::MenuId::new("open_config");
     let config_item = MenuItem::with_id(config_id.clone(), "配置", true, None);
     let snippet_id = muda::MenuId::new("search_snippets");
-    let snippet_item = MenuItem::with_id(snippet_id.clone(), "代码片断", true, None);
+    let snippet_item = MenuItem::with_id(snippet_id.clone(), "代码片段", true, None);
     let quit_id = muda::MenuId::new("quit");
     let quit_item = MenuItem::with_id(quit_id.clone(), "退出", true, None);
-    menu.append_items(&[
-        &config_item,
-        &snippet_item,
-        &PredefinedMenuItem::separator(),
-        &quit_item,
-    ])
-    .unwrap();
+    for entry in windows_menu_order() {
+        match entry {
+            MenuEntry::Snippets => menu.append(&snippet_item).unwrap(),
+            MenuEntry::FullTime => menu.append(&full_item).unwrap(),
+            MenuEntry::Date => menu.append(&date_item).unwrap(),
+            MenuEntry::CompactTime => menu.append(&compact_item).unwrap(),
+            MenuEntry::Separator => menu.append(&PredefinedMenuItem::separator()).unwrap(),
+            MenuEntry::Json => menu.append(&json_formatter_item).unwrap(),
+            MenuEntry::Password => menu.append(&password_submenu).unwrap(),
+            MenuEntry::Md5 => menu.append(&md5_submenu).unwrap(),
+            MenuEntry::Config => menu.append(&config_item).unwrap(),
+            MenuEntry::Sync => {}
+            MenuEntry::Quit => menu.append(&quit_item).unwrap(),
+        }
+    }
 
     let rgba = create_icon_rgba();
     let icon = image::RgbaImage::from_raw(32, 32, rgba).expect("Failed to create icon");
@@ -278,48 +558,46 @@ pub fn main(
         .unwrap();
 
     let running_for_thread = running.clone();
+    let config_apply_tx_for_thread = config_apply_tx.clone();
     let menu_channel = MenuEvent::receiver();
-    std::thread::spawn(move || {
-        loop {
-            if let Ok(event) = menu_channel.recv() {
-                match event.id.0.as_str() {
-                    "full" => copy_time("full"),
-                    "date" => copy_time("date"),
-                    "compact" => copy_time("compact"),
-                    "pwd8" => copy_to_clipboard(&generate_password(8)),
-                    "pwd12" => copy_to_clipboard(&generate_password(12)),
-                    "pwd16" => copy_to_clipboard(&generate_password(16)),
-                    "md5_16" => {
-                        let time_text = get_time_text("full");
-                        copy_to_clipboard(&generate_md5(&time_text, 16));
-                    }
-                    "md5_32" => {
-                        let time_text = get_time_text("full");
-                        copy_to_clipboard(&generate_md5(&time_text, 32));
-                    }
-                    "open_config" => {
-                        // Windows 暂不支持 ConfigWindow，显示提示
-                        let _ = notify_rust::Notification::new()
-                            .summary("配置")
-                            .body("请在 ~/.config/copy-time-tray/config.yaml 中手动配置")
-                            .show();
-                    }
-                    "search_snippets" => {
-                        send_refresh_to_search();
-                        let _ = cmd_tx.send(UiCommand::Show);
-                    }
-                    "open_json_formatter" => launch_json_formatter(),
-                    "quit" => {
-                        running_for_thread.store(false, std::sync::atomic::Ordering::SeqCst);
-                    }
-                    _ => {}
+    std::thread::spawn(move || loop {
+        if let Ok(event) = menu_channel.recv() {
+            match event.id.0.as_str() {
+                "full" => copy_time("full"),
+                "date" => copy_time("date"),
+                "compact" => copy_time("compact"),
+                "pwd8" => copy_to_clipboard(&generate_password(8)),
+                "pwd12" => copy_to_clipboard(&generate_password(12)),
+                "pwd16" => copy_to_clipboard(&generate_password(16)),
+                "md5_16" => {
+                    let time_text = get_time_text("full");
+                    copy_to_clipboard(&generate_md5(&time_text, 16));
                 }
+                "md5_32" => {
+                    let time_text = get_time_text("full");
+                    copy_to_clipboard(&generate_md5(&time_text, 32));
+                }
+                "open_config" => {
+                    launch_hotkey_settings(config_apply_tx_for_thread.clone());
+                }
+                "search_snippets" => {
+                    send_refresh_to_search();
+                    let _ = cmd_tx.send(UiCommand::Show);
+                }
+                "open_json_formatter" => launch_json_formatter(),
+                "quit" => {
+                    running_for_thread.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+                _ => {}
             }
         }
     });
 
     // Windows 保持进程存活，直到收到退出信号
     while running.load(std::sync::atomic::Ordering::SeqCst) {
+        while let Ok((config, response_tx)) = config_apply_rx.try_recv() {
+            let _ = response_tx.send(apply_config_with_hotkey(config));
+        }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }

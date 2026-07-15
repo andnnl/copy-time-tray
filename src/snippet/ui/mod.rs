@@ -9,6 +9,7 @@ pub mod editor;
 #[cfg(target_os = "linux")]
 pub mod linux_manager;
 pub mod search;
+#[cfg(target_os = "linux")]
 pub mod tabs;
 
 #[derive(Debug, Clone)]

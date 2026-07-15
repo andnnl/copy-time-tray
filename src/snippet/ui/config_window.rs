@@ -111,47 +111,57 @@ impl ConfigWindow {
         })
     }
 
-    pub fn show(parent: Option<&gtk::Window>) -> Option<Config> {
+    fn build_config(dialog: &ConfigWindow) -> Config {
+        let sync_config = Self::build_sync_config_from_dialog(dialog);
+        let mut config = Config::load().unwrap_or_default();
+        config.sync = sync_config;
+        config.general = crate::snippet::config::GeneralConfig {
+            auto_sync: dialog.general_tab.auto_sync_switch.is_active(),
+            sync_interval: dialog
+                .general_tab
+                .sync_interval_entry
+                .text()
+                .to_string()
+                .parse()
+                .unwrap_or(300),
+            notify_on_success: dialog.general_tab.notify_success_switch.is_active(),
+            notify_on_failure: dialog.general_tab.notify_failure_switch.is_active(),
+            notify_on_create: dialog.general_tab.notify_create_switch.is_active(),
+            snippet_hotkey: dialog.general_tab.snippet_hotkey(),
+        };
+        config
+    }
+
+    pub fn show<F>(parent: Option<&gtk::Window>, mut apply: F) -> bool
+    where
+        F: FnMut(Config) -> Result<(), String>,
+    {
         let dialog = Self::new(parent);
         dialog.window.show_all();
 
-        let result = dialog.window.run();
-        dialog.window.hide();
-
-        if result == gtk::ResponseType::Ok {
-            // Validate all tabs
-            if let Err(e) = dialog.sync_tab.on_save() {
-                show_error_dialog(parent, &e);
-                return None;
+        loop {
+            if dialog.window.run() != gtk::ResponseType::Ok {
+                dialog.window.hide();
+                return false;
             }
-            if let Err(e) = dialog.general_tab.on_save() {
-                show_error_dialog(parent, &e);
-                return None;
+            if let Err(error) = dialog.sync_tab.on_save() {
+                show_error_dialog(parent, &error);
+                continue;
             }
-
-            let sync_config = Self::build_sync_config_from_dialog(&dialog);
-
-            let general_config = crate::snippet::config::GeneralConfig {
-                auto_sync: dialog.general_tab.auto_sync_switch.is_active(),
-                sync_interval: dialog
-                    .general_tab
-                    .sync_interval_entry
-                    .text()
-                    .to_string()
-                    .parse()
-                    .unwrap_or(300),
-                notify_on_success: dialog.general_tab.notify_success_switch.is_active(),
-                notify_on_failure: dialog.general_tab.notify_failure_switch.is_active(),
-                notify_on_create: dialog.general_tab.notify_create_switch.is_active(),
-            };
-
-            let mut config = Config::load().unwrap_or_default();
-            config.sync = sync_config;
-            config.general = general_config;
-
-            Some(config)
-        } else {
-            None
+            if let Err(error) = dialog.general_tab.on_save() {
+                dialog.general_tab.show_error(&error);
+                continue;
+            }
+            match apply(Self::build_config(&dialog)) {
+                Ok(()) => {
+                    dialog
+                        .general_tab
+                        .show_success("快捷键绑定成功，配置已保存");
+                    dialog.window.hide();
+                    return true;
+                }
+                Err(error) => dialog.general_tab.show_error(&error),
+            }
         }
     }
 }

@@ -1,6 +1,10 @@
 use serde::Serialize;
 use serde_json::ser::{PrettyFormatter, Serializer};
 
+const JSON_EDITOR_MIN_HEIGHT: f32 = 180.0;
+const JSON_EDITOR_RESERVED_HEIGHT: f32 = 140.0;
+const JSON_FORMATTER_MIN_WINDOW_HEIGHT: f32 = 360.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum JsonFormat {
     #[default]
@@ -51,9 +55,38 @@ pub fn format_json(input: &str, format: JsonFormat) -> Result<String, serde_json
     }
 }
 
+pub fn json_editor_height(available_height: f32) -> f32 {
+    (available_height - JSON_EDITOR_RESERVED_HEIGHT).max(JSON_EDITOR_MIN_HEIGHT)
+}
+
+pub const fn json_formatter_min_window_height() -> f32 {
+    JSON_FORMATTER_MIN_WINDOW_HEIGHT
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{format_json, JsonFormat};
+    use super::{
+        format_json, json_editor_height, json_formatter_min_window_height, JsonFormat,
+        JSON_EDITOR_MIN_HEIGHT, JSON_EDITOR_RESERVED_HEIGHT,
+    };
+
+    #[test]
+    fn json_editor_height_grows_with_available_space() {
+        assert!(json_editor_height(900.0) > json_editor_height(600.0));
+    }
+
+    #[test]
+    fn json_editor_height_respects_minimum() {
+        assert_eq!(json_editor_height(100.0), 180.0);
+    }
+
+    #[test]
+    fn minimum_window_height_leaves_room_for_editor_and_controls() {
+        assert!(
+            json_formatter_min_window_height() - JSON_EDITOR_RESERVED_HEIGHT
+                >= JSON_EDITOR_MIN_HEIGHT
+        );
+    }
 
     #[test]
     fn formats_json_with_four_spaces() {

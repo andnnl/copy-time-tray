@@ -20,6 +20,10 @@ fn new_snippet_parent_id(
     }
 }
 
+fn is_escape_key(name: &str) -> bool {
+    name.eq_ignore_ascii_case("Escape")
+}
+
 use dialogs::{
     show_create_snippet_dialog, show_delete_snippet_dialog, show_edit_folder_dialog,
     show_edit_snippet_dialog,
@@ -791,7 +795,24 @@ pub fn show() {
         }
     });
 
+    let dialog_for_escape = dialog.clone();
+    dialog.connect_key_press_event(move |_, event| {
+        let key_name = event
+            .keyval()
+            .name()
+            .map(|name| name.to_string())
+            .unwrap_or_default();
+        if is_escape_key(&key_name) {
+            dialog_for_escape.hide();
+            DIALOG_OPEN.store(false, Ordering::SeqCst);
+            gtk::glib::Propagation::Stop
+        } else {
+            gtk::glib::Propagation::Proceed
+        }
+    });
+
     dialog.show_all();
+    entry.grab_focus();
     let refresh = refresh_tree_store.clone();
     let dialog_for_response = dialog.clone();
     let selected_parent_id_for_create = selected_parent_id.clone();
@@ -896,7 +917,13 @@ pub fn show() {
 
 #[cfg(test)]
 mod tests {
-    use super::new_snippet_parent_id;
+    use super::{is_escape_key, new_snippet_parent_id};
+
+    #[test]
+    fn only_escape_hides_the_main_snippet_dialog() {
+        assert!(is_escape_key("Escape"));
+        assert!(!is_escape_key("Return"));
+    }
 
     #[test]
     fn selected_folder_is_the_default_parent_for_new_snippets() {

@@ -1,5 +1,6 @@
 use crate::app::MANAGER;
 use crate::json_formatter::{format_json, JsonFormat};
+use crate::menu_order::{linux_menu_order, MenuEntry};
 use crate::snippet::ui::UiCommand;
 use crate::utilities::{generate_md5, generate_password, get_time_text};
 use gtk::prelude::*;
@@ -10,6 +11,7 @@ use gtk::{
 use libappindicator::{AppIndicator, AppIndicatorStatus};
 use notify_rust::Notification;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 static JSON_DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
 
@@ -17,9 +19,24 @@ fn reset_json_dialog_open() {
     JSON_DIALOG_OPEN.store(false, Ordering::SeqCst);
 }
 
+fn ui_command_poll_interval() -> Duration {
+    Duration::from_millis(50)
+}
+
+fn json_formatter_is_resizable() -> bool {
+    true
+}
+
+fn json_formatter_window_type_hint() -> gtk::gdk::WindowTypeHint {
+    gtk::gdk::WindowTypeHint::Normal
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{reset_json_dialog_open, JSON_DIALOG_OPEN};
+    use super::{
+        json_formatter_is_resizable, json_formatter_window_type_hint, reset_json_dialog_open,
+        ui_command_poll_interval, JSON_DIALOG_OPEN,
+    };
     use std::sync::atomic::Ordering;
 
     #[test]
@@ -29,6 +46,24 @@ mod tests {
         reset_json_dialog_open();
 
         assert!(!JSON_DIALOG_OPEN.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn ui_command_poll_interval_is_non_zero() {
+        assert!(!ui_command_poll_interval().is_zero());
+    }
+
+    #[test]
+    fn json_formatter_window_is_resizable() {
+        assert!(json_formatter_is_resizable());
+    }
+
+    #[test]
+    fn json_formatter_uses_normal_window_type_for_maximize_support() {
+        assert_eq!(
+            json_formatter_window_type_hint(),
+            gtk::gdk::WindowTypeHint::Normal
+        );
     }
 }
 
@@ -53,9 +88,10 @@ fn show_json_formatter() {
 
     let dialog = Dialog::new();
     dialog.set_title("JSON 格式化");
+    dialog.set_type_hint(json_formatter_window_type_hint());
     dialog.set_default_size(900, 600);
     dialog.set_position(WindowPosition::Center);
-    dialog.set_resizable(true);
+    dialog.set_resizable(json_formatter_is_resizable());
 
     dialog.connect_delete_event(|_, _| {
         reset_json_dialog_open();
@@ -82,10 +118,12 @@ fn show_json_formatter() {
     let input_view = TextView::new();
     let input_buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
     input_view.set_buffer(Some(&input_buffer));
+    input_view.set_monospace(true);
     input_view.set_wrap_mode(gtk::WrapMode::WordChar);
     let output_view = TextView::new();
     let output_buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
     output_view.set_buffer(Some(&output_buffer));
+    output_view.set_monospace(true);
     output_view.set_editable(false);
     output_view.set_cursor_visible(false);
     output_view.set_wrap_mode(gtk::WrapMode::WordChar);
@@ -198,7 +236,7 @@ pub fn main(
     cmd_rx: crossbeam_channel::Receiver<UiCommand>,
 ) {
     gtk::init().expect("Failed to initialize GTK");
-    gtk::glib::idle_add_local(move || {
+    gtk::glib::timeout_add_local(ui_command_poll_interval(), move || {
         while let Ok(command) = cmd_rx.try_recv() {
             match command {
                 UiCommand::Show => crate::snippet::ui::linux_manager::show(),
@@ -236,17 +274,12 @@ pub fn main(
     // 复制时间菜单项
     let full_item = MenuItem::with_label("复制完整时间");
     full_item.connect_activate(move |_| copy_time("full"));
-    menu.append(&full_item);
 
     let date_item = MenuItem::with_label("复制日期");
     date_item.connect_activate(move |_| copy_time("date"));
-    menu.append(&date_item);
 
     let compact_item = MenuItem::with_label("复制纯数字");
     compact_item.connect_activate(move |_| copy_time("compact"));
-    menu.append(&compact_item);
-
-    menu.append(&SeparatorMenuItem::new());
 
     // 密码生成子菜单
     let password_menu = Menu::new();
@@ -274,8 +307,6 @@ pub fn main(
     });
     password_menu.append(&pwd16_item);
 
-    menu.append(&password_item);
-
     // MD5 子菜单
     let md5_menu = Menu::new();
     let md5_item = MenuItem::with_label("MD5");
@@ -297,45 +328,29 @@ pub fn main(
     });
     md5_menu.append(&md5_32_item);
 
-    menu.append(&md5_item);
-
     let json_item = MenuItem::with_label("JSON");
     json_item.connect_activate(|_| show_json_formatter());
-    menu.append(&json_item);
-
-    menu.append(&SeparatorMenuItem::new());
 
     let config_item = MenuItem::with_label("配置");
     config_item.connect_activate(move |_| {
         glib::idle_add(move || {
-            if let Some(new_config) = crate::snippet::ui::config_window::ConfigWindow::show(None) {
-                if let Err(e) = new_config.save() {
-                    let _ = notify_rust::Notification::new()
-                        .summary("配置保存失败")
-                        .body(&e.to_string())
-                        .show();
-                } else {
-                    if let Some(mut m) = MANAGER.get().and_then(|m| m.lock().ok()) {
-                        let _ = m.reload_config();
-                        m.schedule_push();
-                    }
-                    let _ = notify_rust::Notification::new()
-                        .summary("配置已保存")
-                        .body("配置已更新")
-                        .show();
-                }
+            if crate::snippet::ui::config_window::ConfigWindow::show(
+                None,
+                crate::app::apply_config_with_hotkey,
+            ) {
+                let _ = notify_rust::Notification::new()
+                    .summary("配置已保存")
+                    .body("快捷键绑定成功，配置已更新")
+                    .show();
             }
             glib::ControlFlow::Break
         });
     });
-    menu.append(&config_item);
-
-    let snippet_item = MenuItem::with_label("代码片断");
+    let snippet_item = MenuItem::with_label("代码片段");
     let cmd_tx_clone = _cmd_tx.clone();
     snippet_item.connect_activate(move |_| {
         let _ = cmd_tx_clone.send(UiCommand::Show);
     });
-    menu.append(&snippet_item);
 
     let sync_item = MenuItem::with_label("同步");
     let cmd_tx_for_sync = _cmd_tx.clone();
@@ -343,11 +358,24 @@ pub fn main(
         eprintln!("[SYNC] Sync menu clicked");
         let _ = cmd_tx_for_sync.send(UiCommand::Sync);
     });
-    menu.append(&sync_item);
 
     let quit_item = MenuItem::with_label("退出");
     quit_item.connect_activate(|_| gtk::main_quit());
-    menu.append(&quit_item);
+    for entry in linux_menu_order() {
+        match entry {
+            MenuEntry::Snippets => menu.append(&snippet_item),
+            MenuEntry::FullTime => menu.append(&full_item),
+            MenuEntry::Date => menu.append(&date_item),
+            MenuEntry::CompactTime => menu.append(&compact_item),
+            MenuEntry::Separator => menu.append(&SeparatorMenuItem::new()),
+            MenuEntry::Json => menu.append(&json_item),
+            MenuEntry::Password => menu.append(&password_item),
+            MenuEntry::Md5 => menu.append(&md5_item),
+            MenuEntry::Config => menu.append(&config_item),
+            MenuEntry::Sync => menu.append(&sync_item),
+            MenuEntry::Quit => menu.append(&quit_item),
+        }
+    }
 
     menu.show_all();
     indicator.set_menu(&mut menu);

@@ -1,12 +1,27 @@
+use crate::hotkey::{should_open_snippets, HotkeyService, Shortcut};
 use crate::platform;
+use crate::snippet::config::Config;
 use crate::snippet::SnippetManager;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+#[cfg(target_os = "windows")]
+use std::cell::RefCell;
+#[cfg(target_os = "windows")]
+use std::sync::Arc;
 
 #[cfg(target_os = "windows")]
 use crate::snippet::ui::search::SearchPopup;
 pub use crate::snippet::ui::{UiCommand, UiResponse};
 
 pub static MANAGER: OnceLock<Mutex<SnippetManager>> = OnceLock::new();
+#[cfg(target_os = "linux")]
+static HOTKEY_SERVICE: OnceLock<Mutex<HotkeyService>> = OnceLock::new();
+#[cfg(target_os = "windows")]
+thread_local! {
+    static HOTKEY_SERVICE: RefCell<Option<HotkeyService>> = const { RefCell::new(None) };
+}
+static HOTKEY_CURRENT_ID: AtomicU32 = AtomicU32::new(0);
 #[cfg(target_os = "windows")]
 static CMD_TX: OnceLock<crossbeam_channel::Sender<UiCommand>> = OnceLock::new();
 
@@ -38,7 +53,12 @@ pub fn run() {
         std::thread::spawn(move || launch_egui(cmd_rx, response_sender, running_for_ui));
     }
 
-    launch_global_hotkey(cmd_tx.clone());
+    if let Err(error) = launch_global_hotkey(cmd_tx.clone()) {
+        let _ = notify_rust::Notification::new()
+            .summary("快捷键初始化失败")
+            .body(&error)
+            .show();
+    }
     #[cfg(target_os = "windows")]
     spawn_response_handler(resp_rx);
 
@@ -80,21 +100,116 @@ pub fn send_refresh_to_search() {
     }
 }
 
-fn launch_global_hotkey(cmd_tx: crossbeam_channel::Sender<UiCommand>) {
-    use global_hotkey::hotkey::{Code, HotKey, Modifiers};
-    use global_hotkey::GlobalHotKeyManager;
+fn launch_global_hotkey(cmd_tx: crossbeam_channel::Sender<UiCommand>) -> Result<(), String> {
+    let configured = Config::load().unwrap_or_default().general.snippet_hotkey;
+    let initial = match configured.parse::<Shortcut>() {
+        Ok(shortcut) => shortcut,
+        Err(error) => {
+            let fallback = "Ctrl+Shift+S"
+                .parse::<Shortcut>()
+                .map_err(|fallback_error| fallback_error.to_string())?;
+            let _ = notify_rust::Notification::new()
+                .summary("快捷键配置无效")
+                .body(&format!("{error}，已临时使用 {fallback}"))
+                .show();
+            fallback
+        }
+    };
+    let service = HotkeyService::new(initial).map_err(|error| error.to_string())?;
+    HOTKEY_CURRENT_ID.store(service.current_id(), Ordering::Release);
+    #[cfg(target_os = "linux")]
+    HOTKEY_SERVICE
+        .set(Mutex::new(service))
+        .map_err(|_| "快捷键服务已初始化".to_string())?;
+    #[cfg(target_os = "windows")]
+    HOTKEY_SERVICE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_some() {
+            Err("快捷键服务已初始化".to_string())
+        } else {
+            *slot = Some(service);
+            Ok(())
+        }
+    })?;
 
-    let manager = GlobalHotKeyManager::new().unwrap();
-    let hotkey = HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyS);
-    manager.register(hotkey).unwrap();
     let event_receiver = global_hotkey::GlobalHotKeyEvent::receiver();
     std::thread::spawn(move || loop {
         if let Ok(event) = event_receiver.recv() {
-            if event.state == global_hotkey::HotKeyState::Pressed {
+            let current_id = HOTKEY_CURRENT_ID.load(Ordering::Acquire);
+            let matches = should_open_snippets(current_id, event.id, event.state);
+            if matches {
                 let _ = cmd_tx.send(UiCommand::Show);
             }
         }
     });
+    Ok(())
+}
+
+fn apply_config_with_service(
+    mut config: Config,
+    service: &mut HotkeyService,
+) -> Result<(), String> {
+    let candidate = config
+        .general
+        .snippet_hotkey
+        .parse::<Shortcut>()
+        .map_err(|error| error.to_string())?;
+    config.general.snippet_hotkey = candidate.to_string();
+    let previous_config = Config::load().map_err(|error| error.to_string())?;
+    let previous_shortcut = service.current();
+
+    service
+        .rebind(candidate)
+        .map_err(|error| error.to_string())?;
+    HOTKEY_CURRENT_ID.store(service.current_id(), Ordering::Release);
+    if let Err(error) = config.save() {
+        return match service.rebind(previous_shortcut) {
+            Ok(()) => {
+                HOTKEY_CURRENT_ID.store(service.current_id(), Ordering::Release);
+                Err(format!("配置保存失败：{error}"))
+            }
+            Err(rollback_error) => Err(format!(
+                "配置保存失败：{error}；快捷键回滚失败：{rollback_error}"
+            )),
+        };
+    }
+
+    if let Some(mut manager) = MANAGER.get().and_then(|manager| manager.lock().ok()) {
+        if let Err(error) = manager.reload_config() {
+            let restore_config_result = previous_config.save();
+            let restore_hotkey_result = service.rebind(previous_shortcut);
+            HOTKEY_CURRENT_ID.store(service.current_id(), Ordering::Release);
+            return Err(match (restore_config_result, restore_hotkey_result) {
+                (Ok(()), Ok(())) => format!("配置应用失败：{error}"),
+                (config_result, hotkey_result) => format!(
+                    "配置应用失败：{error}；配置回滚结果：{config_result:?}；快捷键回滚结果：{hotkey_result:?}"
+                ),
+            });
+        }
+        manager.schedule_push();
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub fn apply_config_with_hotkey(config: Config) -> Result<(), String> {
+    let service = HOTKEY_SERVICE
+        .get()
+        .ok_or_else(|| "快捷键服务尚未初始化".to_string())?;
+    let mut service = service.lock().map_err(|error| error.to_string())?;
+    apply_config_with_service(config, &mut service)
+}
+
+#[cfg(target_os = "windows")]
+pub fn apply_config_with_hotkey(config: Config) -> Result<(), String> {
+    HOTKEY_SERVICE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let service = slot
+            .as_mut()
+            .ok_or_else(|| "快捷键服务尚未初始化".to_string())?;
+        apply_config_with_service(config, service)
+    })
 }
 
 fn handle_ui_response(response: UiResponse) {

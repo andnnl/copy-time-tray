@@ -15,6 +15,13 @@ pub struct SearchPopup {
     cmd_receiver: Option<Receiver<UiCommand>>,
     resp_sender: Option<Sender<UiResponse>>,
     editor: EditorPopup,
+    search_focus_requested: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowVisibilityAction {
+    ShowAndFocus,
+    Hide,
 }
 
 impl Default for SearchPopup {
@@ -30,6 +37,7 @@ impl Default for SearchPopup {
             cmd_receiver: None,
             resp_sender: None,
             editor: EditorPopup::default(),
+            search_focus_requested: true,
         }
     }
 }
@@ -67,15 +75,44 @@ impl SearchPopup {
         }
     }
 
+    fn show_window(&mut self) -> WindowVisibilityAction {
+        self.visible = true;
+        self.search_focus_requested = true;
+        WindowVisibilityAction::ShowAndFocus
+    }
+
+    fn hide_window(&mut self) -> WindowVisibilityAction {
+        self.visible = false;
+        WindowVisibilityAction::Hide
+    }
+
+    fn take_search_focus_request(&mut self) -> bool {
+        std::mem::take(&mut self.search_focus_requested)
+    }
+
+    fn apply_window_action(ctx: &egui::Context, action: WindowVisibilityAction) {
+        match action {
+            WindowVisibilityAction::ShowAndFocus => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+            WindowVisibilityAction::Hide => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+        }
+    }
+
     fn process_commands(&mut self, ctx: &egui::Context) {
         if let Some(rx) = self.cmd_receiver.take() {
             loop {
                 match rx.try_recv() {
                     Ok(UiCommand::Show) => {
-                        self.visible = true;
+                        let action = self.show_window();
+                        Self::apply_window_action(ctx, action);
                     }
                     Ok(UiCommand::Hide) => {
-                        self.visible = false;
+                        let action = self.hide_window();
+                        Self::apply_window_action(ctx, action);
                     }
                     Ok(UiCommand::RefreshSnippets(snippets)) => {
                         self.snippets = snippets;
@@ -91,6 +128,8 @@ impl SearchPopup {
         }
         if self.visible {
             ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
     }
 }
@@ -140,11 +179,13 @@ impl eframe::App for SearchPopup {
                     }
                 }
 
+                let focus_search = self.take_search_focus_request();
                 ui.horizontal(|ui| {
                     ui.label("🔍");
-                    if ui.text_edit_singleline(&mut self.search_query).lost_focus()
-                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                    {}
+                    let response = ui.text_edit_singleline(&mut self.search_query);
+                    if focus_search {
+                        response.request_focus();
+                    }
                 });
 
                 if self.search_query != self.last_query {
@@ -246,12 +287,39 @@ impl eframe::App for SearchPopup {
                 }
 
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    self.visible = false;
+                    let action = self.hide_window();
                     if let Some(ref sender) = self.resp_sender {
                         let _ = sender.send(UiResponse::Close);
                     }
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    Self::apply_window_action(ctx, action);
                 }
             });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SearchPopup, WindowVisibilityAction};
+
+    #[test]
+    fn show_requests_window_visibility_focus_and_search_focus() {
+        let mut popup = SearchPopup::default();
+
+        let action = popup.show_window();
+
+        assert_eq!(action, WindowVisibilityAction::ShowAndFocus);
+        assert!(popup.visible);
+        assert!(popup.take_search_focus_request());
+        assert!(!popup.take_search_focus_request());
+    }
+
+    #[test]
+    fn escape_hides_without_closing_the_native_window() {
+        let mut popup = SearchPopup::default();
+
+        let action = popup.hide_window();
+
+        assert_eq!(action, WindowVisibilityAction::Hide);
+        assert!(!popup.visible);
     }
 }
