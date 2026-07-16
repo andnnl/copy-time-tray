@@ -2,6 +2,8 @@ mod dialogs;
 mod transfer;
 mod tree;
 
+use gtk::prelude::WidgetExt;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -24,6 +26,92 @@ fn is_escape_key(name: &str) -> bool {
     name.eq_ignore_ascii_case("Escape")
 }
 
+type XdotoolCommand = (String, Vec<String>);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CopyAction {
+    HideDialog,
+    PasteIntoWindow(u64),
+}
+
+fn copy_actions(target_window: Option<u64>) -> Vec<CopyAction> {
+    let mut actions = vec![CopyAction::HideDialog];
+    if let Some(window_id) = target_window {
+        actions.push(CopyAction::PasteIntoWindow(window_id));
+    }
+    actions
+}
+
+fn parse_window_id(output: &str) -> Option<u64> {
+    output.trim().parse::<u64>().ok().filter(|id| *id > 0)
+}
+
+fn paste_commands(window_id: u64) -> Vec<XdotoolCommand> {
+    vec![
+        (
+            "windowactivate".to_string(),
+            vec!["--sync".to_string(), window_id.to_string()],
+        ),
+        (
+            "key".to_string(),
+            vec!["--clearmodifiers".to_string(), "ctrl+v".to_string()],
+        ),
+    ]
+}
+
+fn capture_active_window() -> Option<u64> {
+    let output = Command::new("xdotool")
+        .arg("getactivewindow")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_window_id(std::str::from_utf8(&output.stdout).ok()?)
+}
+
+fn paste_into_window(window_id: u64) {
+    for (command, arguments) in paste_commands(window_id) {
+        let succeeded = Command::new("xdotool")
+            .arg(command)
+            .args(arguments)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !succeeded {
+            return;
+        }
+    }
+}
+
+fn copy_and_paste_snippet(
+    dialog: &gtk::Dialog,
+    content: &str,
+    snippet_name: &str,
+    target_window: Option<u64>,
+) {
+    let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
+    clipboard.set_text(content);
+    clipboard.store();
+    let _ = notify_rust::Notification::new()
+        .summary("Snippet Copied")
+        .body(&format!(
+            "已复制: {}",
+            snippet_name.chars().take(30).collect::<String>()
+        ))
+        .show();
+
+    for action in copy_actions(target_window) {
+        match action {
+            CopyAction::HideDialog => {
+                dialog.hide();
+                DIALOG_OPEN.store(false, Ordering::SeqCst);
+            }
+            CopyAction::PasteIntoWindow(window_id) => paste_into_window(window_id),
+        }
+    }
+}
+
 use dialogs::{
     show_create_snippet_dialog, show_delete_snippet_dialog, show_edit_folder_dialog,
     show_edit_snippet_dialog,
@@ -43,6 +131,7 @@ pub fn show() {
     use crate::snippet::model::SnippetType;
     use gtk::prelude::*;
 
+    let target_window = capture_active_window();
     let dialog = gtk::Dialog::with_buttons::<gtk::Window>(
         Some(snippet_dialog_title()),
         None,
@@ -472,6 +561,7 @@ pub fn show() {
     });
 
     let dialog_for_dblclick = dialog.clone();
+    let target_window_for_dblclick = target_window;
     tree_view.connect_row_activated(move |tv, path, _col| {
         if let Some(model) = tv.model() {
             if let Some(ts) = model.downcast_ref::<gtk::TreeStore>() {
@@ -488,19 +578,12 @@ pub fn show() {
                             ts.value(&iter, 2).get::<String>().unwrap_or_default();
                         let name: String = ts.value(&iter, 1).get::<String>().unwrap_or_default();
                         if !content.is_empty() {
-                            let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
-                            clipboard.set_text(&content);
-                            clipboard.store();
-                            let _ = notify_rust::Notification::new()
-                                .summary("Snippet Copied")
-                                .body(&format!(
-                                    "已复制: {}",
-                                    name.chars().take(30).collect::<String>()
-                                ))
-                                .show();
-                            if let Some(d) = dialog_for_dblclick.downcast_ref::<gtk::Dialog>() {
-                                d.response(gtk::ResponseType::Close);
-                            }
+                            copy_and_paste_snippet(
+                                &dialog_for_dblclick,
+                                &content,
+                                &name,
+                                target_window_for_dblclick,
+                            );
                         }
                     }
                 }
@@ -509,23 +592,12 @@ pub fn show() {
     });
 
     let dialog_for_copy = dialog.clone();
+    let target_window_for_copy = target_window;
     let sc_for_copy = selected_content.clone();
     copy_button.connect_clicked(move |_| {
         let content = sc_for_copy.lock().unwrap().clone();
         if let Some(c) = content {
-            let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
-            clipboard.set_text(&c);
-            clipboard.store();
-            let _ = notify_rust::Notification::new()
-                .summary("Snippet Copied")
-                .body(&format!(
-                    "已复制: {}",
-                    c.chars().take(30).collect::<String>()
-                ))
-                .show();
-            if let Some(d) = dialog_for_copy.downcast_ref::<gtk::Dialog>() {
-                d.response(gtk::ResponseType::Close);
-            }
+            copy_and_paste_snippet(&dialog_for_copy, &c, &c, target_window_for_copy);
         }
     });
 
@@ -917,7 +989,51 @@ pub fn show() {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_escape_key, new_snippet_parent_id};
+    use super::{
+        copy_actions, is_escape_key, new_snippet_parent_id, parse_window_id, paste_commands,
+        CopyAction,
+    };
+
+    #[test]
+    fn copy_hides_before_pasting_into_the_saved_window() {
+        assert_eq!(
+            copy_actions(Some(81_788_938)),
+            vec![
+                CopyAction::HideDialog,
+                CopyAction::PasteIntoWindow(81_788_938),
+            ]
+        );
+        assert_eq!(copy_actions(None), vec![CopyAction::HideDialog]);
+    }
+
+    #[test]
+    fn parses_a_non_zero_x11_window_id() {
+        assert_eq!(parse_window_id("81788938\n"), Some(81_788_938));
+    }
+
+    #[test]
+    fn rejects_invalid_x11_window_ids() {
+        for output in ["", "0", "not-a-window", "81788938\nextra"] {
+            assert_eq!(parse_window_id(output), None, "{output:?}");
+        }
+    }
+
+    #[test]
+    fn paste_commands_activate_the_target_then_send_ctrl_v() {
+        assert_eq!(
+            paste_commands(81_788_938),
+            vec![
+                (
+                    "windowactivate".to_string(),
+                    vec!["--sync".to_string(), "81788938".to_string()],
+                ),
+                (
+                    "key".to_string(),
+                    vec!["--clearmodifiers".to_string(), "ctrl+v".to_string()],
+                ),
+            ]
+        );
+    }
 
     #[test]
     fn only_escape_hides_the_main_snippet_dialog() {
