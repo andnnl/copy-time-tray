@@ -204,7 +204,17 @@ impl SnippetStore {
     pub fn load_from_sync(&mut self, remote_snippets: Vec<Snippet>) -> Result<(), StoreError> {
         use std::collections::HashMap;
 
-        let by_id: HashMap<String, usize> = self
+        let mut newest_remote_by_id: HashMap<String, Snippet> = HashMap::new();
+        for remote in remote_snippets {
+            match newest_remote_by_id.get(&remote.id) {
+                Some(current) if current.update_date >= remote.update_date => {}
+                _ => {
+                    newest_remote_by_id.insert(remote.id.clone(), remote);
+                }
+            }
+        }
+
+        let mut by_id: HashMap<String, usize> = self
             .data
             .snippets
             .iter()
@@ -212,13 +222,15 @@ impl SnippetStore {
             .map(|(i, s)| (s.id.clone(), i))
             .collect();
 
-        for remote in remote_snippets {
+        for remote in newest_remote_by_id.into_values() {
             if let Some(idx) = by_id.get(&remote.id) {
                 let existing = &mut self.data.snippets[*idx];
                 if remote.update_date > existing.update_date {
                     *existing = remote;
                 }
             } else {
+                let index = self.data.snippets.len();
+                by_id.insert(remote.id.clone(), index);
                 self.data.snippets.push(remote);
             }
         }
@@ -617,6 +629,50 @@ mod tests {
             store.set_favorite(&deleted_id, true),
             Err(StoreError::NotFavoriteable(_))
         ));
+    }
+
+    #[test]
+    fn newer_remote_favorite_wins_under_lww() {
+        let (mut store, _dir) = temp_store();
+        let base = chrono::Utc::now() - chrono::Duration::hours(1);
+        let mut local = Snippet::new_snippet("same".into(), "content".into(), None);
+        local.id = "same-id".into();
+        local.favorite = false;
+        local.update_date = base;
+        store.add(local).unwrap();
+
+        let mut remote = Snippet::new_snippet("same".into(), "content".into(), None);
+        remote.id = "same-id".into();
+        remote.favorite = true;
+        remote.synced = true;
+        remote.update_date = base + chrono::Duration::minutes(1);
+        store.load_from_sync(vec![remote]).unwrap();
+
+        assert!(store.get("same-id").unwrap().favorite);
+    }
+
+    #[test]
+    fn load_from_sync_collapses_duplicate_remote_stable_ids_before_append() {
+        let (mut store, _dir) = temp_store();
+        let base = chrono::Utc::now() - chrono::Duration::hours(1);
+        let mut older = Snippet::new_snippet("old path".into(), "old".into(), None);
+        older.id = "stable-id".into();
+        older.update_date = base;
+        let mut newer = Snippet::new_snippet("new path".into(), "new".into(), None);
+        newer.id = "stable-id".into();
+        newer.update_date = base + chrono::Duration::minutes(1);
+
+        store.load_from_sync(vec![older, newer]).unwrap();
+
+        assert_eq!(
+            store
+                .list()
+                .iter()
+                .filter(|item| item.id == "stable-id")
+                .count(),
+            1
+        );
+        assert_eq!(store.get("stable-id").unwrap().name, "new path");
     }
 
     #[test]

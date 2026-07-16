@@ -52,6 +52,8 @@ pub struct TreeEntry {
     pub entry_type: crate::snippet::model::SnippetType,
     pub sort: i32,
     pub deleted: bool,
+    #[serde(default)]
+    pub favorite: bool,
     pub create_date: DateTime<Utc>,
     pub update_date: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -69,6 +71,7 @@ pub fn build_tree_entries(snippets: &[&Snippet]) -> Vec<TreeEntry> {
             entry_type: s.snippet_type.clone(),
             sort: s.sort,
             deleted: s.deleted,
+            favorite: s.favorite,
             create_date: s.create_date,
             update_date: s.update_date,
             content: s.content.clone(),
@@ -100,6 +103,8 @@ fn tree_entries_to_snippets(tree_entries: Vec<TreeEntry>) -> Vec<Snippet> {
             synced: true,
             create_date: entry.create_date,
             update_date: entry.update_date,
+            favorite: entry.favorite,
+            github_remote_path: None,
             gitee_gist_id: None,
         })
         .collect()
@@ -298,8 +303,12 @@ fn pull_github(config: &SyncConfig, client: &dyn HttpClient) -> Result<Vec<Snipp
 fn parse_yaml_snippet(relative_path: &str, body: &str) -> Result<Snippet, SyncError> {
     #[derive(Deserialize)]
     struct RemoteSnippet {
+        #[serde(default)]
+        id: Option<String>,
         name: String,
         content: String,
+        #[serde(default)]
+        favorite: bool,
         #[serde(default)]
         sort: i32,
         created: String,
@@ -317,7 +326,9 @@ fn parse_yaml_snippet(relative_path: &str, body: &str) -> Result<Snippet, SyncEr
         .map_err(|e| SyncError::Parse(format!("Invalid updated date: {}", e)))?
         .with_timezone(&chrono::Utc);
 
-    let id = generate_file_id(relative_path);
+    let id = remote
+        .id
+        .unwrap_or_else(|| generate_file_id(relative_path));
 
     Ok(Snippet {
         id,
@@ -330,6 +341,8 @@ fn parse_yaml_snippet(relative_path: &str, body: &str) -> Result<Snippet, SyncEr
         synced: true,
         create_date,
         update_date,
+        favorite: remote.favorite,
+        github_remote_path: Some(relative_path.to_string()),
         gitee_gist_id: None,
     })
 }
@@ -544,13 +557,17 @@ fn sanitize_filename(name: &str) -> String {
 fn snippet_to_yaml(snippet: &Snippet) -> Result<String, SyncError> {
     let content = snippet.content.as_deref().unwrap_or("");
     let yaml = format!(
-        r#"name: {}
+        r#"id: {}
+favorite: {}
+name: {}
 content: |
 {}
 sort: {}
 created: "{}"
 updated: "{}"
 "#,
+        snippet.id,
+        snippet.favorite,
         snippet.name,
         content
             .lines()
@@ -661,6 +678,54 @@ mod tests {
     }
 
     #[test]
+    fn tree_entry_round_trip_keeps_favorite_and_legacy_tree_defaults_false() {
+        let mut snippet = Snippet::new_snippet("ping".into(), "ping localhost".into(), None);
+        snippet.favorite = true;
+        let entries = build_tree_entries(&[&snippet]);
+        let json = serde_json::to_string(&entries).unwrap();
+        assert!(json.contains("\"favorite\":true"));
+        assert!(tree_entries_to_snippets(entries)[0].favorite);
+
+        let legacy: Vec<TreeEntry> = serde_json::from_str(
+            r#"[{"id":"old","parent_id":null,"name":"old","type":"snippet","sort":0,"deleted":false,"create_date":"2026-07-16T00:00:00Z","update_date":"2026-07-16T00:00:00Z","content":"echo old"}]"#,
+        )
+        .unwrap();
+        assert!(!legacy[0].favorite);
+    }
+
+    #[test]
+    fn github_yaml_writes_and_reads_stable_id_favorite_and_remote_path() {
+        let mut snippet = Snippet::new_snippet("new name".into(), "echo new".into(), None);
+        snippet.id = "stable-id".into();
+        snippet.favorite = true;
+
+        let yaml = snippet_to_yaml(&snippet).unwrap();
+        assert!(yaml.contains("id: stable-id"));
+        assert!(yaml.contains("favorite: true"));
+
+        let parsed = parse_yaml_snippet("snippets/new-name.yaml", &yaml).unwrap();
+        assert_eq!(parsed.id, "stable-id");
+        assert!(parsed.favorite);
+        assert_eq!(
+            parsed.github_remote_path.as_deref(),
+            Some("snippets/new-name.yaml")
+        );
+    }
+
+    #[test]
+    fn legacy_github_yaml_keeps_path_derived_id_and_defaults_favorite() {
+        let yaml = "name: old\ncontent: |\n  echo old\nsort: 0\ncreated: \"2026-07-16T00:00:00Z\"\nupdated: \"2026-07-16T00:00:00Z\"\n";
+        let parsed = parse_yaml_snippet("snippets/old.yaml", yaml).unwrap();
+
+        assert_eq!(parsed.id, generate_file_id("snippets/old.yaml"));
+        assert!(!parsed.favorite);
+        assert_eq!(
+            parsed.github_remote_path.as_deref(),
+            Some("snippets/old.yaml")
+        );
+    }
+
+    #[test]
     fn test_auth_headers_github() {
         let config = test_config();
         let headers = auth_headers(&config);
@@ -742,6 +807,7 @@ mod tests {
             entry_type: SnippetType::Folder,
             sort: 0,
             deleted: false,
+            favorite: false,
             create_date: chrono::Utc::now(),
             update_date: chrono::Utc::now(),
             content: None,
@@ -765,6 +831,7 @@ mod tests {
             entry_type: SnippetType::Snippet,
             sort: 0,
             deleted: false,
+            favorite: false,
             create_date: chrono::Utc::now(),
             update_date: chrono::Utc::now(),
             content: Some("echo ping".into()),
@@ -870,6 +937,7 @@ mod tests {
             entry_type: SnippetType::Snippet,
             sort: 0,
             deleted: true,
+            favorite: false,
             create_date: deleted_at - chrono::Duration::days(1),
             update_date: deleted_at,
             content: Some("old content".into()),
