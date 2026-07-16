@@ -22,6 +22,10 @@ pub struct Snippet {
     pub synced: bool,
     pub create_date: DateTime<Utc>,
     pub update_date: DateTime<Utc>,
+    #[serde(default)]
+    pub favorite: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_remote_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gitee_gist_id: Option<String>,
 }
@@ -40,6 +44,8 @@ impl Snippet {
             synced: false,
             create_date: now,
             update_date: now,
+            favorite: false,
+            github_remote_path: None,
             gitee_gist_id: None,
         }
     }
@@ -57,6 +63,8 @@ impl Snippet {
             synced: false,
             create_date: now,
             update_date: now,
+            favorite: false,
+            github_remote_path: None,
             gitee_gist_id: None,
         }
     }
@@ -185,5 +193,46 @@ mod tests {
         let folder: Snippet = serde_json::from_str(json).unwrap();
         assert_eq!(folder.snippet_type, SnippetType::Folder);
         assert_eq!(folder.content, None);
+    }
+
+    #[test]
+    fn new_items_start_unfavorited_without_github_path() {
+        let snippet = Snippet::new_snippet("test".into(), "content".into(), None);
+        let folder = Snippet::new_folder("folder".into(), None);
+
+        assert!(!snippet.favorite);
+        assert_eq!(snippet.github_remote_path, None);
+        assert!(!folder.favorite);
+        assert_eq!(folder.github_remote_path, None);
+    }
+
+    #[test]
+    fn legacy_json_defaults_favorite_and_github_path() {
+        let json = r#"{
+            "id":"legacy","parent_id":null,"name":"legacy","type":"snippet",
+            "content":"echo legacy","sort":0,"deleted":false,"synced":true,
+            "create_date":"2026-07-16T00:00:00Z","update_date":"2026-07-16T00:00:00Z"
+        }"#;
+
+        let snippet: Snippet = serde_json::from_str(json).unwrap();
+
+        assert!(!snippet.favorite);
+        assert_eq!(snippet.github_remote_path, None);
+    }
+
+    #[test]
+    fn model_round_trip_keeps_favorite_and_github_path() {
+        let mut snippet = Snippet::new_snippet("test".into(), "content".into(), None);
+        snippet.favorite = true;
+        snippet.github_remote_path = Some("snippets/test.yaml".into());
+
+        let restored: Snippet =
+            serde_json::from_str(&serde_json::to_string(&snippet).unwrap()).unwrap();
+
+        assert!(restored.favorite);
+        assert_eq!(
+            restored.github_remote_path.as_deref(),
+            Some("snippets/test.yaml")
+        );
     }
 }

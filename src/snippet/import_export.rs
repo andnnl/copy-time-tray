@@ -115,6 +115,8 @@ pub fn import_from_termora(path: &Path) -> Result<Vec<Snippet>, ImportExportErro
             synced: false,
             create_date,
             update_date,
+            favorite: false,
+            github_remote_path: None,
             gitee_gist_id: None,
         };
 
@@ -341,6 +343,18 @@ mod tests {
         use chrono::Datelike;
         let dt = millis_to_datetime(1700000000000);
         assert_eq!(dt.year(), 2023);
+    }
+
+    #[test]
+    fn termora_import_defaults_to_unfavorited_without_github_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("termora.json");
+        fs::write(&path, sample_termora_json()).unwrap();
+
+        for snippet in import_from_termora(&path).unwrap() {
+            assert!(!snippet.favorite);
+            assert_eq!(snippet.github_remote_path, None);
+        }
     }
 
     #[test]

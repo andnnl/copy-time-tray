@@ -15,6 +15,7 @@ pub enum StoreError {
     Io(std::io::Error),
     Serde(serde_json::Error),
     NotFound(String),
+    NotFavoriteable(String),
     Duplicate(String),
 }
 
@@ -24,6 +25,7 @@ impl std::fmt::Display for StoreError {
             StoreError::Io(e) => write!(f, "IO error: {}", e),
             StoreError::Serde(e) => write!(f, "Serialization error: {}", e),
             StoreError::NotFound(id) => write!(f, "Snippet not found: {}", id),
+            StoreError::NotFavoriteable(id) => write!(f, "Snippet cannot be favorited: {}", id),
             StoreError::Duplicate(name) => write!(f, "Duplicate: {}", name),
         }
     }
@@ -158,6 +160,18 @@ impl SnippetStore {
             self.save()
         } else {
             Err(StoreError::NotFound(id.to_string()))
+        }
+    }
+
+    pub fn set_favorite(&mut self, id: &str, favorite: bool) -> Result<(), StoreError> {
+        match self.get(id) {
+            None => Err(StoreError::NotFound(id.to_string())),
+            Some(snippet)
+                if snippet.deleted || snippet.snippet_type != SnippetType::Snippet =>
+            {
+                Err(StoreError::NotFavoriteable(id.to_string()))
+            }
+            Some(_) => self.update(id, |snippet| snippet.favorite = favorite),
         }
     }
 
@@ -560,6 +574,49 @@ mod tests {
         assert_eq!(summary.skipped_existing_id, 0);
         assert_eq!(summary.skipped_duplicate, 1);
         assert!(store.get("reused-id").is_some());
+    }
+
+    #[test]
+    fn set_favorite_persists_marks_pending_and_updates_timestamp() {
+        let (mut store, dir) = temp_store();
+        let mut snippet = Snippet::new_snippet("test".into(), "content".into(), None);
+        snippet.synced = true;
+        snippet.update_date = chrono::Utc::now() - chrono::Duration::minutes(1);
+        let before = snippet.update_date;
+        let id = snippet.id.clone();
+        store.add(snippet).unwrap();
+
+        store.set_favorite(&id, true).unwrap();
+
+        let updated = store.get(&id).unwrap();
+        assert!(updated.favorite);
+        assert!(!updated.synced);
+        assert!(updated.update_date > before);
+        drop(store);
+
+        let reloaded = SnippetStore::new(dir.path().join("snippets.json")).unwrap();
+        assert!(reloaded.get(&id).unwrap().favorite);
+    }
+
+    #[test]
+    fn set_favorite_rejects_folder_and_deleted_snippet() {
+        let (mut store, _dir) = temp_store();
+        let folder = Snippet::new_folder("folder".into(), None);
+        let folder_id = folder.id.clone();
+        let mut deleted = Snippet::new_snippet("deleted".into(), "content".into(), None);
+        deleted.deleted = true;
+        let deleted_id = deleted.id.clone();
+        store.add(folder).unwrap();
+        store.add(deleted).unwrap();
+
+        assert!(matches!(
+            store.set_favorite(&folder_id, true),
+            Err(StoreError::NotFavoriteable(_))
+        ));
+        assert!(matches!(
+            store.set_favorite(&deleted_id, true),
+            Err(StoreError::NotFavoriteable(_))
+        ));
     }
 
     #[test]
