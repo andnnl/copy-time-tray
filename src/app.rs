@@ -261,6 +261,16 @@ fn handle_ui_response(response: UiResponse) {
             #[cfg(target_os = "windows")]
             send_refresh_to_search();
         }
+        UiResponse::FavoriteToggled { id, favorite } => {
+            if manager
+                .with_store_mut(|store| store.set_favorite(&id, favorite))
+                .is_ok()
+            {
+                manager.schedule_push();
+            }
+            #[cfg(target_os = "windows")]
+            send_refresh_to_search();
+        }
         UiResponse::RequestPull | UiResponse::RequestPush | UiResponse::Close => {}
     }
 }
@@ -292,11 +302,20 @@ fn launch_egui(
         let (popup_sender, popup_receiver) = crossbeam_channel::unbounded::<UiCommand>();
         *popup_tx.lock().unwrap() = Some(popup_sender);
         let search = SearchPopup::new(popup_receiver, resp_tx.clone());
+        let window_state = crate::snippet::config::SnippetWindowState::load().unwrap_or_default();
+        let mut viewport = egui::ViewportBuilder::default()
+            .with_inner_size([window_state.width as f32, window_state.height as f32])
+            .with_min_inner_size([600.0, 400.0])
+            .with_title("代码片段")
+            .with_resizable(true)
+            .with_maximize_button(true)
+            .with_maximized(window_state.maximized)
+            .with_visible(false);
+        if let (Some(x), Some(y)) = (window_state.x, window_state.y) {
+            viewport = viewport.with_position([x as f32, y as f32]);
+        }
         let native_options = eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default()
-                .with_inner_size([600.0, 400.0])
-                .with_title("Snippet 搜索")
-                .with_visible(false),
+            viewport,
             ..Default::default()
         };
         let _ = eframe::run_native(

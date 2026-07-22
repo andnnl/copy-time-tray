@@ -189,7 +189,8 @@ impl SnippetManager {
         for attempt in 0..MAX_RETRIES {
             eprintln!("[SYNC] Push attempt {} of {}", attempt + 1, MAX_RETRIES);
             match sync::push(&sync_config, &self.client, &pending) {
-                Ok((_, gist_id)) => {
+                Ok(result) => {
+                    let gist_id = result.gitee_gist_id;
                     eprintln!("[SYNC] Push succeeded, gist_id={:?}", gist_id);
                     if let Some(id) = gist_id {
                         if !id.is_empty() {
@@ -202,7 +203,11 @@ impl SnippetManager {
                     // update_date to now, making older local copies look newer than remote edits.
                     if let Ok(mut store) = self.store.lock() {
                         let ids: Vec<String> = pending.iter().map(|s| s.id.clone()).collect();
-                        let _ = store.mark_synced(&ids);
+                        if sync_config.provider == config::SyncProvider::Github {
+                            let _ = store.mark_github_synced(&result.succeeded);
+                        } else {
+                            let _ = store.mark_synced(&ids);
+                        }
                         eprintln!("[SYNC] Marked {} snippets as synced", pending.len());
                     }
                     let _ = notify_rust::Notification::new()
@@ -324,7 +329,8 @@ impl SnippetManager {
                     MAX_RETRIES
                 );
                 match sync::push(&sync_config, &client, &pending) {
-                    Ok((_, gist_id)) => {
+                    Ok(result) => {
+                        let gist_id = result.gitee_gist_id;
                         eprintln!(
                             "[SYNC] schedule_push: push succeeded, gist_id={:?}",
                             gist_id
@@ -350,6 +356,27 @@ impl SnippetManager {
                                         log::warn!("schedule_push: load config failed: {}", e);
                                     }
                                 }
+                            }
+                        }
+                        if sync_config.provider == config::SyncProvider::Github {
+                            match SnippetStore::new(store_path.clone()) {
+                                Ok(mut store) => {
+                                    if let Err(e) = store.mark_github_synced(&result.succeeded) {
+                                        log::warn!("schedule_push: mark GitHub sync failed: {}", e);
+                                    }
+                                }
+                                Err(e) => log::warn!("schedule_push: store reopen failed: {}", e),
+                            }
+                        } else {
+                            match SnippetStore::new(store_path.clone()) {
+                                Ok(mut store) => {
+                                    let ids: Vec<String> =
+                                        pending.iter().map(|snippet| snippet.id.clone()).collect();
+                                    if let Err(e) = store.mark_synced(&ids) {
+                                        log::warn!("schedule_push: mark sync failed: {}", e);
+                                    }
+                                }
+                                Err(e) => log::warn!("schedule_push: store reopen failed: {}", e),
                             }
                         }
                         return;

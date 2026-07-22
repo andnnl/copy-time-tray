@@ -166,9 +166,7 @@ impl SnippetStore {
     pub fn set_favorite(&mut self, id: &str, favorite: bool) -> Result<(), StoreError> {
         match self.get(id) {
             None => Err(StoreError::NotFound(id.to_string())),
-            Some(snippet)
-                if snippet.deleted || snippet.snippet_type != SnippetType::Snippet =>
-            {
+            Some(snippet) if snippet.deleted || snippet.snippet_type != SnippetType::Snippet => {
                 Err(StoreError::NotFavoriteable(id.to_string()))
             }
             Some(_) => self.update(id, |snippet| snippet.favorite = favorite),
@@ -196,6 +194,21 @@ impl SnippetStore {
         for id in ids {
             if let Some(snippet) = self.get_mut(id) {
                 snippet.synced = true;
+            }
+        }
+        self.save()
+    }
+
+    pub fn mark_github_synced(
+        &mut self,
+        successes: &[crate::snippet::sync::GithubPushSuccess],
+    ) -> Result<(), StoreError> {
+        for success in successes {
+            if let Some(snippet) = self.get_mut(&success.id) {
+                if snippet.update_date == success.expected_update_date {
+                    snippet.synced = true;
+                    snippet.github_remote_path = Some(success.path.clone());
+                }
             }
         }
         self.save()

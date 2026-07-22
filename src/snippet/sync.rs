@@ -127,6 +127,7 @@ pub trait HttpClient: Send {
         &self,
         url: &str,
         headers: &HashMap<String, String>,
+        body: &str,
     ) -> Result<HttpResponse, SyncError>;
 }
 
@@ -180,12 +181,16 @@ impl HttpClient for RealHttpClient {
         &self,
         url: &str,
         headers: &HashMap<String, String>,
+        body: &str,
     ) -> Result<HttpResponse, SyncError> {
         let mut req = self.client.delete(url);
         for (k, v) in headers {
             req = req.header(k, v);
         }
-        let resp = req.send().map_err(|e| SyncError::Http(e.to_string()))?;
+        let resp = req
+            .body(body.to_string())
+            .send()
+            .map_err(|e| SyncError::Http(e.to_string()))?;
         let status = resp.status().as_u16();
         let body = resp.text().map_err(|e| SyncError::Http(e.to_string()))?;
         Ok(HttpResponse { status, body })
@@ -297,7 +302,16 @@ fn pull_github(config: &SyncConfig, client: &dyn HttpClient) -> Result<Vec<Snipp
         snippets.push(remote_snippet);
     }
 
-    Ok(snippets)
+    let mut newest_by_id: HashMap<String, Snippet> = HashMap::new();
+    for snippet in snippets {
+        match newest_by_id.get(&snippet.id) {
+            Some(existing) if existing.update_date >= snippet.update_date => {}
+            _ => {
+                newest_by_id.insert(snippet.id.clone(), snippet);
+            }
+        }
+    }
+    Ok(newest_by_id.into_values().collect())
 }
 
 fn parse_yaml_snippet(relative_path: &str, body: &str) -> Result<Snippet, SyncError> {
@@ -326,9 +340,7 @@ fn parse_yaml_snippet(relative_path: &str, body: &str) -> Result<Snippet, SyncEr
         .map_err(|e| SyncError::Parse(format!("Invalid updated date: {}", e)))?
         .with_timezone(&chrono::Utc);
 
-    let id = remote
-        .id
-        .unwrap_or_else(|| generate_file_id(relative_path));
+    let id = remote.id.unwrap_or_else(|| generate_file_id(relative_path));
 
     Ok(Snippet {
         id,
@@ -356,17 +368,33 @@ pub fn generate_file_id(relative_path: &str) -> String {
     hex[..16].to_string()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubPushSuccess {
+    pub id: String,
+    pub path: String,
+    pub expected_update_date: DateTime<Utc>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PushResult {
+    pub succeeded: Vec<GithubPushSuccess>,
+    pub gitee_gist_id: Option<String>,
+}
+
 pub fn push(
     config: &SyncConfig,
     client: &dyn HttpClient,
     snippets: &[Snippet],
-) -> Result<(Vec<String>, Option<String>), SyncError> {
+) -> Result<PushResult, SyncError> {
     match config.provider {
         SyncProvider::Gitee => {
             let gist_id = push_to_single_gist(config, snippets)?;
-            Ok((Vec::new(), Some(gist_id)))
+            Ok(PushResult {
+                succeeded: Vec::new(),
+                gitee_gist_id: Some(gist_id),
+            })
         }
-        SyncProvider::Github => push_github(config, client, snippets).map(|failed| (failed, None)),
+        SyncProvider::Github => push_github(config, client, snippets),
     }
 }
 
@@ -466,81 +494,132 @@ fn create_new_gist(
     Ok(gist.id)
 }
 
+fn github_content_metadata(
+    config: &SyncConfig,
+    client: &dyn HttpClient,
+    path: &str,
+) -> Result<Option<String>, SyncError> {
+    #[derive(Deserialize)]
+    struct Metadata {
+        sha: String,
+    }
+    let response = client.get(
+        &format!(
+            "{}/contents/{}?ref={}",
+            base_url(config),
+            path,
+            config.branch
+        ),
+        &auth_headers(config),
+    )?;
+    match response.status {
+        200 => serde_json::from_str::<Metadata>(&response.body)
+            .map(|metadata| Some(metadata.sha))
+            .map_err(|error| SyncError::Parse(format!("Invalid GitHub metadata: {error}"))),
+        404 => Ok(None),
+        status => Err(SyncError::Http(format!(
+            "Metadata request failed: {status}"
+        ))),
+    }
+}
+
 fn push_github(
     config: &SyncConfig,
     client: &dyn HttpClient,
     snippets: &[Snippet],
-) -> Result<Vec<String>, SyncError> {
+) -> Result<PushResult, SyncError> {
     let base = base_url(config);
     let headers = auth_headers(config);
-    let mut failed_ids = Vec::new();
+    let mut result = PushResult::default();
+    let mut failed = 0;
 
-    for snippet in snippets {
-        if snippet.snippet_type == crate::snippet::model::SnippetType::Folder {
-            continue;
-        }
-
-        let relative_path = snippet_to_path(snippet)?;
-        let yaml_content = snippet_to_yaml(snippet)?;
-
-        if snippet.deleted {
-            let delete_url = format!("{}/contents/{}", base, relative_path);
-            let _delete_body = serde_json::json!({
-                "message": format!("Delete snippet: {}", snippet.name),
-                "branch": config.branch,
-            });
-            let resp = client.delete(&delete_url, &headers);
-            match resp {
-                Ok(r) if r.status == 200 || r.status == 404 => {
-                    // 404 = 文件已被删除，视为成功
+    for snippet in snippets
+        .iter()
+        .filter(|snippet| snippet.snippet_type == crate::snippet::model::SnippetType::Snippet)
+    {
+        let target_path = snippet_to_path(snippet)?;
+        let operation = (|| -> Result<(), SyncError> {
+            if snippet.deleted {
+                let delete_path = snippet
+                    .github_remote_path
+                    .as_deref()
+                    .unwrap_or(&target_path);
+                if let Some(sha) = github_content_metadata(config, client, delete_path)? {
+                    let body = serde_json::to_string(&serde_json::json!({
+                        "message": format!("Delete snippet: {}", snippet.name),
+                        "sha": sha,
+                        "branch": config.branch,
+                    }))
+                    .map_err(|error| SyncError::Store(error.to_string()))?;
+                    let response = client.delete(
+                        &format!("{base}/contents/{delete_path}"),
+                        &headers,
+                        &body,
+                    )?;
+                    if response.status != 200 {
+                        return Err(SyncError::Http(format!(
+                            "Delete failed: {}",
+                            response.status
+                        )));
+                    }
                 }
-                Ok(r) => {
-                    log::warn!("Delete failed for {}: {}", snippet.name, r.status);
-                    failed_ids.push(snippet.id.clone());
-                    continue;
-                }
-                Err(e) => {
-                    log::warn!("Delete error for {}: {}", snippet.name, e);
-                    failed_ids.push(snippet.id.clone());
-                    continue;
-                }
+                result.succeeded.push(GithubPushSuccess {
+                    id: snippet.id.clone(),
+                    path: delete_path.to_string(),
+                    expected_update_date: snippet.update_date,
+                });
+                return Ok(());
             }
-        } else {
-            let put_url = format!("{}/contents/{}", base, relative_path);
+
             let encoded = base64::Engine::encode(
                 &base64::engine::general_purpose::STANDARD,
-                yaml_content.as_bytes(),
+                snippet_to_yaml(snippet)?.as_bytes(),
             );
-
-            let body = serde_json::json!({
-                "message": format!("Update snippet: {}", snippet.name),
-                "content": encoded,
-                "branch": config.branch,
-            });
-            let body_str = serde_json::to_string(&body).unwrap();
-            let resp = client.put(&put_url, &headers, &body_str);
-            match resp {
-                Ok(r) if r.status == 200 || r.status == 201 => {}
-                Ok(r) => {
-                    log::warn!("Push failed for {}: {}", snippet.name, r.status);
-                    failed_ids.push(snippet.id.clone());
-                    continue;
-                }
-                Err(e) => {
-                    log::warn!("Push error for {}: {}", snippet.name, e);
-                    failed_ids.push(snippet.id.clone());
-                    continue;
+            let mut body = serde_json::json!({"message": format!("Update snippet: {}", snippet.name), "content": encoded, "branch": config.branch});
+            if let Some(sha) = github_content_metadata(config, client, &target_path)? {
+                body["sha"] = serde_json::Value::String(sha);
+            }
+            let body = serde_json::to_string(&body)
+                .map_err(|error| SyncError::Store(error.to_string()))?;
+            let response =
+                client.put(&format!("{base}/contents/{target_path}"), &headers, &body)?;
+            if response.status != 200 && response.status != 201 {
+                return Err(SyncError::Http(format!("Push failed: {}", response.status)));
+            }
+            if let Some(old_path) = snippet
+                .github_remote_path
+                .as_deref()
+                .filter(|old| *old != target_path)
+            {
+                if let Some(sha) = github_content_metadata(config, client, old_path)? {
+                    let body = serde_json::to_string(&serde_json::json!({"message": format!("Delete snippet: {}", snippet.name), "sha": sha, "branch": config.branch})).map_err(|error| SyncError::Store(error.to_string()))?;
+                    let response =
+                        client.delete(&format!("{base}/contents/{old_path}"), &headers, &body)?;
+                    if response.status != 200 {
+                        return Err(SyncError::Http(format!(
+                            "Rename cleanup failed: {}",
+                            response.status
+                        )));
+                    }
                 }
             }
+            result.succeeded.push(GithubPushSuccess {
+                id: snippet.id.clone(),
+                path: target_path.clone(),
+                expected_update_date: snippet.update_date,
+            });
+            Ok(())
+        })();
+        if let Err(error) = operation {
+            log::warn!("GitHub push failed for {}: {}", snippet.name, error);
+            failed += 1;
         }
     }
-
-    if failed_ids.is_empty() {
-        Ok(Vec::new())
+    if failed == 0 {
+        Ok(result)
     } else {
         Err(SyncError::Store(format!(
-            "Failed to push {} snippets",
-            failed_ids.len()
+            "Failed to push {failed} snippets"
         )))
     }
 }
@@ -606,6 +685,11 @@ mod tests {
                         r#"{"tree":[{"path":"snippets/test.yaml","type":"blob","sha":"abc123"}]}"#
                             .into(),
                 })
+            } else if url.contains("contents/snippets/old-name.yaml") {
+                Ok(HttpResponse {
+                    status: 200,
+                    body: r#"{"sha":"old-sha"}"#.into(),
+                })
             } else if url.contains("contents/snippets/test.yaml") {
                 Ok(HttpResponse {
                     status: 200,
@@ -636,6 +720,7 @@ mod tests {
             &self,
             url: &str,
             _headers: &HashMap<String, String>,
+            _body: &str,
         ) -> Result<HttpResponse, SyncError> {
             MOCK_REQUESTS.with(|r| r.lock().unwrap().push(("DELETE".into(), url.into())));
             Ok(HttpResponse {
@@ -710,6 +795,31 @@ mod tests {
             parsed.github_remote_path.as_deref(),
             Some("snippets/new-name.yaml")
         );
+    }
+
+    #[test]
+    fn github_rename_puts_new_path_before_deleting_old_path_with_sha() {
+        MOCK_REQUESTS.with(|requests| requests.lock().unwrap().clear());
+        let mut snippet = Snippet::new_snippet("new name".into(), "echo new".into(), None);
+        snippet.github_remote_path = Some("snippets/old-name.yaml".into());
+
+        let result = push_github(&test_config(), &MockHttpClient, &[snippet]).unwrap();
+        assert_eq!(result.succeeded.len(), 1);
+        assert_eq!(result.succeeded[0].path, "snippets/new name.yaml");
+        let requests = MOCK_REQUESTS.with(|requests| requests.lock().unwrap().clone());
+        let put_index = requests
+            .iter()
+            .position(|(method, url)| {
+                method == "PUT" && url.ends_with("/contents/snippets/new name.yaml")
+            })
+            .unwrap();
+        let delete_index = requests
+            .iter()
+            .position(|(method, url)| {
+                method == "DELETE" && url.ends_with("/contents/snippets/old-name.yaml")
+            })
+            .unwrap();
+        assert!(put_index < delete_index);
     }
 
     #[test]

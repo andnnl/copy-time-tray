@@ -27,6 +27,7 @@ pub enum UiResponse {
     SnippetCreated(Snippet),
     SnippetUpdated(Snippet),
     SnippetDeleted(String),
+    FavoriteToggled { id: String, favorite: bool },
     RequestPull,
     RequestPush,
     Close,

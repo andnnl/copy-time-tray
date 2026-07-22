@@ -56,6 +56,83 @@ impl Default for GiteeConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SnippetWindowState {
+    #[serde(default = "default_snippet_window_width")]
+    pub width: i32,
+    #[serde(default = "default_snippet_window_height")]
+    pub height: i32,
+    #[serde(default)]
+    pub x: Option<i32>,
+    #[serde(default)]
+    pub y: Option<i32>,
+    #[serde(default)]
+    pub maximized: bool,
+}
+
+fn default_snippet_window_width() -> i32 {
+    800
+}
+
+fn default_snippet_window_height() -> i32 {
+    550
+}
+
+impl SnippetWindowState {
+    pub fn path() -> Result<PathBuf, ConfigError> {
+        Ok(Config::config_dir()?.join("snippet_window.json"))
+    }
+
+    pub fn load() -> Result<Self, ConfigError> {
+        Self::load_from(&Self::path()?)
+    }
+
+    fn load_from(path: &std::path::Path) -> Result<Self, ConfigError> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let content = fs::read_to_string(path)?;
+        serde_json::from_str(&content).map_err(|error| {
+            ConfigError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                error.to_string(),
+            ))
+        })
+    }
+
+    pub fn save(&self) -> Result<(), ConfigError> {
+        Self::save_to(self, &Self::path()?)
+    }
+
+    fn save_to(&self, path: &std::path::Path) -> Result<(), ConfigError> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let content = serde_json::to_vec_pretty(self).map_err(|error| {
+            ConfigError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                error.to_string(),
+            ))
+        })?;
+        let temporary = path.with_extension("json.tmp");
+        fs::write(&temporary, content)?;
+        fs::rename(&temporary, path)?;
+        Ok(())
+    }
+}
+
+impl Default for SnippetWindowState {
+    fn default() -> Self {
+        Self {
+            width: default_snippet_window_width(),
+            height: default_snippet_window_height(),
+            x: None,
+            y: None,
+            maximized: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeneralConfig {
     #[serde(default = "default_true")]
@@ -419,12 +496,30 @@ sync:
     #[test]
     fn legacy_general_config_uses_default_snippet_hotkey() {
         let yaml = r#"
-sync: null
-general:
-  auto_sync: true
-"#;
+ sync: null
+ general:
+   auto_sync: true
+ "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.general.snippet_hotkey, "Ctrl+Shift+S");
+    }
+
+    #[test]
+    fn snippet_window_state_uses_an_independent_atomic_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippet_window.json");
+        let state = SnippetWindowState {
+            width: 1100,
+            height: 700,
+            x: Some(24),
+            y: Some(48),
+            maximized: true,
+        };
+
+        SnippetWindowState::save_to(&state, &path).unwrap();
+
+        assert_eq!(SnippetWindowState::load_from(&path).unwrap(), state);
+        assert!(!path.with_extension("json.tmp").exists());
     }
 
     #[test]
