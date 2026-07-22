@@ -68,15 +68,6 @@ impl Snippet {
             gitee_gist_id: None,
         }
     }
-
-    pub fn remote_id(&self, relative_path: &str) -> String {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(relative_path.as_bytes());
-        let result = hasher.finalize();
-        let hex = format!("{:x}", result);
-        hex[..16].to_string()
-    }
 }
 
 #[cfg(test)]
@@ -98,23 +89,6 @@ mod tests {
         let folder = Snippet::new_folder("folder".into(), None);
         assert_eq!(folder.snippet_type, SnippetType::Folder);
         assert_eq!(folder.content, None);
-    }
-
-    #[test]
-    fn test_remote_id_is_deterministic() {
-        let snippet = Snippet::new_snippet("查看日志".into(), "content".into(), None);
-        let id1 = snippet.remote_id("snippets/查看日志.yaml");
-        let id2 = snippet.remote_id("snippets/查看日志.yaml");
-        assert_eq!(id1, id2);
-        assert_eq!(id1.len(), 16);
-    }
-
-    #[test]
-    fn test_remote_id_differs_by_path() {
-        let snippet = Snippet::new_snippet("test".into(), "content".into(), None);
-        let id1 = snippet.remote_id("snippets/a.yaml");
-        let id2 = snippet.remote_id("snippets/b.yaml");
-        assert_ne!(id1, id2);
     }
 
     #[test]

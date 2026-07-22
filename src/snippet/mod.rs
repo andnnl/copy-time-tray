@@ -1,11 +1,13 @@
 pub mod config;
 pub mod gitee;
+pub mod github;
 pub mod import_export;
 pub mod model;
 pub mod store;
 pub mod sync;
 pub mod ui;
 
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -33,23 +35,41 @@ const MAX_RETRIES: u32 = 3;
 /// Initial backoff delay in seconds (doubles each retry: 1s, 2s, 4s)
 const INITIAL_BACKOFF_SECS: u64 = 1;
 
-fn set_gitee_gist_id(config: &mut Config, id: String) {
+fn set_gist_id(config: &mut Config, provider: &config::SyncProvider, id: String) {
     if let Some(ref mut sync) = config.sync {
-        sync.gitee_config.gist_id = Some(id);
+        match provider {
+            config::SyncProvider::Github => sync.github_config.gist_id = Some(id),
+            config::SyncProvider::Gitee => sync.gitee_config.gist_id = Some(id),
+        }
     }
 }
 
-fn snippets_for_push(sync_config: &config::SyncConfig, store: &SnippetStore) -> Vec<Snippet> {
-    match sync_config.provider {
-        config::SyncProvider::Gitee => store.list().iter().cloned().collect(),
-        config::SyncProvider::Github => store.pending_sync().into_iter().cloned().collect(),
-    }
+fn set_github_gist_id(config: &mut Config, id: String) {
+    set_gist_id(config, &config::SyncProvider::Github, id);
+}
+
+fn set_gitee_gist_id(config: &mut Config, id: String) {
+    set_gist_id(config, &config::SyncProvider::Gitee, id);
+}
+
+fn snippets_for_push(_sync_config: &config::SyncConfig, store: &SnippetStore) -> Vec<Snippet> {
+    store.list().iter().cloned().collect()
+}
+
+fn should_retry(error: &sync::SyncError) -> bool {
+    !error.is_authentication_failure()
+}
+
+fn mark_scheduled_push_synced(store_path: &Path, snippets: &[Snippet]) -> Result<(), String> {
+    let ids: Vec<String> = snippets.iter().map(|snippet| snippet.id.clone()).collect();
+    let mut store =
+        SnippetStore::new(store_path.to_path_buf()).map_err(|error| error.to_string())?;
+    store.mark_synced(&ids).map_err(|error| error.to_string())
 }
 
 pub struct SnippetManager {
     store: Mutex<SnippetStore>,
     config: Config,
-    client: sync::RealHttpClient,
     ui_sender: Option<Sender<UiResponse>>,
     ui_receiver: Option<Receiver<UiResponse>>,
     /// Tracks the next push sequence number; incremented on each schedule_push call.
@@ -73,8 +93,6 @@ impl SnippetManager {
             store.list().len()
         );
 
-        let client = sync::RealHttpClient::new();
-
         let (tx, rx) = unbounded();
 
         let push_seq = Arc::new(AtomicU64::new(0));
@@ -82,7 +100,6 @@ impl SnippetManager {
         Ok(Self {
             store: Mutex::new(store),
             config,
-            client,
             ui_sender: Some(tx),
             ui_receiver: Some(rx),
             push_seq,
@@ -115,8 +132,7 @@ impl SnippetManager {
             .join("snippets.json");
         thread::spawn(move || {
             eprintln!("[SYNC] Pulling from remote...");
-            let client = sync::RealHttpClient::new();
-            match sync::pull(&sync_config, &client) {
+            match sync::pull(&sync_config) {
                 Ok(remote) => {
                     eprintln!(
                         "[SYNC] Pull succeeded, {} snippets from remote",
@@ -154,18 +170,18 @@ impl SnippetManager {
             .sync
             .as_ref()
             .ok_or_else(|| "未配置同步".to_string())?;
-        let remote = sync::pull(sync_config, &self.client).map_err(|e| e.to_string())?;
+        let remote = sync::pull(sync_config).map_err(|e| e.to_string())?;
         if let Ok(mut store) = self.store.lock() {
             store.load_from_sync(remote).map_err(|e| e.to_string())?;
         }
         Ok(())
     }
 
-    fn apply_gitee_gist_id(&mut self, id: String) -> Result<(), String> {
+    fn apply_gist_id(&mut self, provider: &config::SyncProvider, id: String) -> Result<(), String> {
         let mut cfg = Config::load().map_err(|e| e.to_string())?;
-        set_gitee_gist_id(&mut cfg, id.clone());
+        set_gist_id(&mut cfg, provider, id.clone());
         cfg.save().map_err(|e| e.to_string())?;
-        set_gitee_gist_id(&mut self.config, id);
+        set_gist_id(&mut self.config, provider, id);
         Ok(())
     }
 
@@ -188,14 +204,13 @@ impl SnippetManager {
         }
         for attempt in 0..MAX_RETRIES {
             eprintln!("[SYNC] Push attempt {} of {}", attempt + 1, MAX_RETRIES);
-            match sync::push(&sync_config, &self.client, &pending) {
-                Ok(result) => {
-                    let gist_id = result.gitee_gist_id;
+            match sync::push(&sync_config, &pending) {
+                Ok((_, gist_id)) => {
                     eprintln!("[SYNC] Push succeeded, gist_id={:?}", gist_id);
                     if let Some(id) = gist_id {
                         if !id.is_empty() {
                             eprintln!("[SYNC] Got gist_id: {}", id);
-                            self.apply_gitee_gist_id(id)?;
+                            self.apply_gist_id(&sync_config.provider, id)?;
                             eprintln!("[SYNC] Saved gist_id to config and updated runtime config");
                         }
                     }
@@ -203,11 +218,7 @@ impl SnippetManager {
                     // update_date to now, making older local copies look newer than remote edits.
                     if let Ok(mut store) = self.store.lock() {
                         let ids: Vec<String> = pending.iter().map(|s| s.id.clone()).collect();
-                        if sync_config.provider == config::SyncProvider::Github {
-                            let _ = store.mark_github_synced(&result.succeeded);
-                        } else {
-                            let _ = store.mark_synced(&ids);
-                        }
+                        let _ = store.mark_synced(&ids);
                         eprintln!("[SYNC] Marked {} snippets as synced", pending.len());
                     }
                     let _ = notify_rust::Notification::new()
@@ -218,6 +229,9 @@ impl SnippetManager {
                 }
                 Err(e) => {
                     eprintln!("[SYNC] Push attempt {} failed: {}", attempt + 1, e);
+                    if !should_retry(&e) {
+                        return Err(e.to_string());
+                    }
                     let backoff = Duration::from_secs(INITIAL_BACKOFF_SECS * (1 << attempt));
                     log::warn!(
                         "do_push attempt {}/{} failed: {}, retrying in {:?}",
@@ -257,7 +271,6 @@ impl SnippetManager {
         let store_path = Config::config_dir()
             .expect("config_dir")
             .join("snippets.json");
-        let client = sync::RealHttpClient::new();
 
         thread::spawn(move || {
             eprintln!("[SYNC] Waiting {}ms for debounce...", DEBOUNCE_MS);
@@ -282,7 +295,7 @@ impl SnippetManager {
                 Err(_) => sync_config.clone(),
             };
 
-            match sync::pull(&sync_config, &client) {
+            match sync::pull(&sync_config) {
                 Ok(remote) => {
                     if !remote.is_empty() {
                         match SnippetStore::new(store_path.clone()) {
@@ -328,9 +341,8 @@ impl SnippetManager {
                     attempt + 1,
                     MAX_RETRIES
                 );
-                match sync::push(&sync_config, &client, &pending) {
-                    Ok(result) => {
-                        let gist_id = result.gitee_gist_id;
+                match sync::push(&sync_config, &pending) {
+                    Ok((_, gist_id)) => {
                         eprintln!(
                             "[SYNC] schedule_push: push succeeded, gist_id={:?}",
                             gist_id
@@ -339,7 +351,7 @@ impl SnippetManager {
                             if !id.is_empty() {
                                 match Config::load() {
                                     Ok(mut cfg) => {
-                                        set_gitee_gist_id(&mut cfg, id);
+                                        set_gist_id(&mut cfg, &sync_config.provider, id);
                                         if let Err(e) = cfg.save() {
                                             eprintln!(
                                                 "[SYNC] schedule_push: save gist_id failed: {}",
@@ -358,31 +370,23 @@ impl SnippetManager {
                                 }
                             }
                         }
-                        if sync_config.provider == config::SyncProvider::Github {
-                            match SnippetStore::new(store_path.clone()) {
-                                Ok(mut store) => {
-                                    if let Err(e) = store.mark_github_synced(&result.succeeded) {
-                                        log::warn!("schedule_push: mark GitHub sync failed: {}", e);
-                                    }
-                                }
-                                Err(e) => log::warn!("schedule_push: store reopen failed: {}", e),
-                            }
-                        } else {
-                            match SnippetStore::new(store_path.clone()) {
-                                Ok(mut store) => {
-                                    let ids: Vec<String> =
-                                        pending.iter().map(|snippet| snippet.id.clone()).collect();
-                                    if let Err(e) = store.mark_synced(&ids) {
-                                        log::warn!("schedule_push: mark sync failed: {}", e);
-                                    }
-                                }
-                                Err(e) => log::warn!("schedule_push: store reopen failed: {}", e),
-                            }
+                        if let Err(error) = mark_scheduled_push_synced(&store_path, &pending) {
+                            eprintln!(
+                                "[SYNC] schedule_push: failed to mark snippets as synced: {}",
+                                error
+                            );
+                            log::warn!(
+                                "schedule_push: failed to mark snippets as synced: {}",
+                                error
+                            );
                         }
                         return;
                     }
                     Err(e) => {
                         eprintln!("[SYNC] schedule_push attempt {} failed: {}", attempt + 1, e);
+                        if !should_retry(&e) {
+                            return;
+                        }
                         let backoff = Duration::from_secs(INITIAL_BACKOFF_SECS * (1 << attempt));
                         log::warn!(
                             "schedule_push attempt {}/{} failed: {}, retrying in {:?}",
@@ -413,7 +417,7 @@ impl SnippetManager {
             .as_ref()
             .ok_or_else(|| "未配置同步".to_string())?;
         for attempt in 0..MAX_RETRIES {
-            match sync::pull(sync_config, &self.client) {
+            match sync::pull(sync_config) {
                 Ok(remote) => {
                     if !remote.is_empty() {
                         if let Ok(mut store) = self.store.lock() {
@@ -423,6 +427,9 @@ impl SnippetManager {
                     return Ok(());
                 }
                 Err(e) => {
+                    if !should_retry(&e) {
+                        return Err(e.to_string());
+                    }
                     let backoff = Duration::from_secs(INITIAL_BACKOFF_SECS * (1 << attempt));
                     log::warn!(
                         "do_pull attempt {}/{} failed: {}, retrying in {:?}",
@@ -469,7 +476,7 @@ impl SnippetManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use config::{GiteeConfig, SyncConfig, SyncProvider};
+    use config::{GiteeConfig, GithubConfig, SyncConfig, SyncProvider};
 
     fn gitee_config_with_id(id: Option<&str>) -> Config {
         Config {
@@ -479,6 +486,7 @@ mod tests {
                 repo: String::new(),
                 branch: String::new(),
                 token: String::new(),
+                github_config: GithubConfig::default(),
                 gitee_config: GiteeConfig {
                     gist_id: id.map(String::from),
                     ..GiteeConfig::default()
@@ -507,6 +515,65 @@ mod tests {
         missing_sync.sync = None;
         assert!(!should_auto_sync(&missing_sync));
     }
+    #[test]
+    fn test_authentication_error_is_not_retryable() {
+        assert!(!should_retry(&sync::SyncError::Auth(
+            "GitHub authentication or authorization failed (403)".into()
+        )));
+        assert!(should_retry(&sync::SyncError::Http(
+            "temporary network error".into()
+        )));
+    }
+
+    #[test]
+    fn test_scheduled_push_success_marks_all_tree_ids_synced_in_reopened_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("snippets.json");
+        let mut store = SnippetStore::new(store_path.clone()).unwrap();
+
+        let mut already_synced = Snippet::new_snippet("synced".into(), "remote".into(), None);
+        already_synced.id = "synced-id".into();
+        already_synced.synced = true;
+        store.add(already_synced).unwrap();
+
+        let mut pending = Snippet::new_snippet("pending".into(), "local".into(), None);
+        pending.id = "pending-id".into();
+        pending.synced = false;
+        store.add(pending).unwrap();
+
+        let tree = store.list().to_vec();
+        drop(store);
+
+        mark_scheduled_push_synced(&store_path, &tree).unwrap();
+
+        let reloaded = SnippetStore::new(store_path).unwrap();
+        assert!(reloaded.get("synced-id").unwrap().synced);
+        assert!(reloaded.get("pending-id").unwrap().synced);
+    }
+
+    #[test]
+    fn test_set_github_gist_id_does_not_change_gitee_id() {
+        let mut config = gitee_config_with_id(Some("gitee-gist"));
+
+        set_github_gist_id(&mut config, "github-gist".into());
+
+        let sync = config.sync.unwrap();
+        assert_eq!(sync.github_config.gist_id.as_deref(), Some("github-gist"));
+        assert_eq!(sync.gitee_config.gist_id.as_deref(), Some("gitee-gist"));
+    }
+
+    #[test]
+    fn test_set_gitee_gist_id_does_not_change_github_id() {
+        let mut config = gitee_config_with_id(Some("gitee-gist"));
+        set_github_gist_id(&mut config, "github-gist".into());
+
+        set_gitee_gist_id(&mut config, "new-gitee-gist".into());
+
+        let sync = config.sync.unwrap();
+        assert_eq!(sync.github_config.gist_id.as_deref(), Some("github-gist"));
+        assert_eq!(sync.gitee_config.gist_id.as_deref(), Some("new-gitee-gist"));
+    }
+
     #[test]
     fn test_set_gitee_gist_id_replaces_stale_runtime_id() {
         let mut config = gitee_config_with_id(Some("old-gist"));
@@ -543,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn test_github_push_uses_only_pending_items() {
+    fn test_github_push_uses_whole_tree_not_only_pending_items() {
         let mut config = gitee_config_with_id(Some("gist-id"));
         let sync_config = config.sync.as_mut().unwrap();
         sync_config.provider = SyncProvider::Github;
@@ -563,8 +630,9 @@ mod tests {
 
         let snippets = snippets_for_push(&sync_config, &store);
 
-        assert_eq!(snippets.len(), 1);
-        assert_eq!(snippets[0].id, "pending-id");
+        assert_eq!(snippets.len(), 2);
+        assert!(snippets.iter().any(|s| s.id == "synced-id"));
+        assert!(snippets.iter().any(|s| s.id == "pending-id"));
     }
 }
 

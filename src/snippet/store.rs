@@ -199,21 +199,6 @@ impl SnippetStore {
         self.save()
     }
 
-    pub fn mark_github_synced(
-        &mut self,
-        successes: &[crate::snippet::sync::GithubPushSuccess],
-    ) -> Result<(), StoreError> {
-        for success in successes {
-            if let Some(snippet) = self.get_mut(&success.id) {
-                if snippet.update_date == success.expected_update_date {
-                    snippet.synced = true;
-                    snippet.github_remote_path = Some(success.path.clone());
-                }
-            }
-        }
-        self.save()
-    }
-
     pub fn load_from_sync(&mut self, remote_snippets: Vec<Snippet>) -> Result<(), StoreError> {
         use std::collections::HashMap;
 

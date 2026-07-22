@@ -35,7 +35,7 @@ fn json_formatter_window_type_hint() -> gtk::gdk::WindowTypeHint {
 mod tests {
     use super::{
         json_formatter_is_resizable, json_formatter_window_type_hint, reset_json_dialog_open,
-        ui_command_poll_interval, JSON_DIALOG_OPEN,
+        sync_success_notification_body, ui_command_poll_interval, JSON_DIALOG_OPEN,
     };
     use std::sync::atomic::Ordering;
 
@@ -64,6 +64,11 @@ mod tests {
             json_formatter_window_type_hint(),
             gtk::gdk::WindowTypeHint::Normal
         );
+    }
+
+    #[test]
+    fn sync_success_notification_is_remote_neutral() {
+        assert_eq!(sync_success_notification_body(), "snippet 已同步到远程");
     }
 }
 
@@ -231,6 +236,10 @@ fn show_json_formatter() {
     dialog.show_all();
 }
 
+fn sync_success_notification_body() -> &'static str {
+    "snippet 已同步到远程"
+}
+
 pub fn main(
     _cmd_tx: crossbeam_channel::Sender<UiCommand>,
     cmd_rx: crossbeam_channel::Receiver<UiCommand>,
@@ -248,7 +257,9 @@ pub fn main(
                             let result =
                                 manager.do_pull_with_retry().and_then(|_| manager.do_push());
                             let (summary, body) = match result {
-                                Ok(()) => ("同步完成", "snippet 已同步到 Gitee".to_string()),
+                                Ok(()) => {
+                                    ("同步完成", sync_success_notification_body().to_string())
+                                }
                                 Err(error) => ("同步失败", error),
                             };
                             let _ = notify_rust::Notification::new()

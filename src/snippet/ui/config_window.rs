@@ -1,5 +1,6 @@
+use super::tabs::sync_tab::build_github_sync_config;
 use super::tabs::{about_tab, general_tab, sync_tab, ConfigTab};
-use crate::snippet::config::{Config, GiteeConfig, SyncConfig, SyncProvider};
+use crate::snippet::config::{Config, SyncConfig, SyncProvider};
 use gtk::prelude::*;
 
 pub struct ConfigWindow {
@@ -85,29 +86,46 @@ impl ConfigWindow {
     }
 
     fn build_sync_config_from_dialog(dialog: &ConfigWindow) -> Option<SyncConfig> {
-        let existing_gitee_config = Config::load()
-            .ok()
-            .and_then(|cfg| cfg.sync)
-            .map(|sync| sync.gitee_config)
-            .unwrap_or_default();
+        let existing_sync_config = Config::load().ok().and_then(|cfg| cfg.sync);
+        let provider = match dialog.sync_tab.provider_combo.active_text().as_deref() {
+            Some("gitee") => SyncProvider::Gitee,
+            _ => SyncProvider::Github,
+        };
 
-        Some(SyncConfig {
-            provider: match dialog.sync_tab.provider_combo.active_text().as_deref() {
-                Some("gitee") => SyncProvider::Gitee,
-                _ => SyncProvider::Github,
-            },
-            owner: dialog.sync_tab.owner_entry.text().to_string(),
-            repo: dialog.sync_tab.repo_entry.text().to_string(),
-            branch: dialog.sync_tab.branch_entry.text().to_string(),
-            token: dialog.sync_tab.gh_token_entry.text().to_string(),
-            gitee_config: GiteeConfig {
-                api_base: dialog.sync_tab.gitee_api_entry.text().to_string(),
-                token: dialog.sync_tab.gitee_token_entry.text().to_string(),
-                auto_sync: existing_gitee_config.auto_sync,
-                sync_interval: existing_gitee_config.sync_interval,
-                gist_id: existing_gitee_config.gist_id,
-                gist_description: dialog.sync_tab.gitee_gist_desc_entry.text().to_string(),
-            },
+        Some(match provider {
+            SyncProvider::Github => {
+                let existing_github_config = existing_sync_config
+                    .as_ref()
+                    .map(|sync| sync.github_config.clone())
+                    .unwrap_or_default();
+                let existing_gitee_config = existing_sync_config
+                    .as_ref()
+                    .map(|sync| sync.gitee_config.clone())
+                    .unwrap_or_default();
+                build_github_sync_config(
+                    dialog.sync_tab.gh_token_entry.text().as_str(),
+                    dialog.sync_tab.gh_gist_desc_entry.text().as_str(),
+                    &existing_github_config,
+                    &existing_gitee_config,
+                )
+            }
+            SyncProvider::Gitee => {
+                let existing_github_config = existing_sync_config
+                    .as_ref()
+                    .map(|sync| sync.github_config.clone())
+                    .unwrap_or_default();
+                let existing_gitee_config = existing_sync_config
+                    .as_ref()
+                    .map(|sync| sync.gitee_config.clone())
+                    .unwrap_or_default();
+                sync_tab::build_gitee_sync_config(
+                    dialog.sync_tab.gitee_api_entry.text().as_str(),
+                    dialog.sync_tab.gitee_token_entry.text().as_str(),
+                    dialog.sync_tab.gitee_gist_desc_entry.text().as_str(),
+                    &existing_github_config,
+                    &existing_gitee_config,
+                )
+            }
         })
     }
 

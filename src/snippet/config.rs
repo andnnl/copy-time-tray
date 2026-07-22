@@ -14,12 +14,67 @@ pub enum SyncProvider {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncConfig {
     pub provider: SyncProvider,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub owner: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub repo: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub branch: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub token: String,
     #[serde(default)]
+    pub github_config: GithubConfig,
+    #[serde(default)]
     pub gitee_config: GiteeConfig,
+}
+
+impl SyncConfig {
+    pub fn github(github_config: GithubConfig) -> Self {
+        Self {
+            provider: SyncProvider::Github,
+            owner: String::new(),
+            repo: String::new(),
+            branch: String::new(),
+            token: String::new(),
+            github_config,
+            gitee_config: GiteeConfig::default(),
+        }
+    }
+
+    pub fn github_token(&self) -> &str {
+        if self.github_config.token.is_empty() {
+            &self.token
+        } else {
+            &self.github_config.token
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GithubConfig {
+    #[serde(default = "default_github_api_base")]
+    pub api_base: String,
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub gist_id: Option<String>,
+    #[serde(default = "default_gist_description")]
+    pub gist_description: String,
+}
+
+fn default_github_api_base() -> String {
+    "https://api.github.com".to_string()
+}
+
+impl Default for GithubConfig {
+    fn default() -> Self {
+        Self {
+            api_base: default_github_api_base(),
+            token: String::new(),
+            gist_id: None,
+            gist_description: default_gist_description(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -395,6 +450,66 @@ mod tests {
     }
 
     #[test]
+    fn github_legacy_repository_yaml_remains_readable() {
+        let config: Config = serde_yaml::from_str(
+            r#"
+sync:
+  provider: github
+  owner: old-user
+  repo: old-repo
+  branch: main
+  token: legacy-token
+"#,
+        )
+        .unwrap();
+
+        let sync = config.sync.unwrap();
+        assert_eq!(sync.owner, "old-user");
+        assert_eq!(sync.github_token(), "legacy-token");
+        assert!(sync.github_config.gist_id.is_none());
+    }
+
+    #[test]
+    fn new_github_config_omits_empty_legacy_repository_fields() {
+        let sync = SyncConfig::github(GithubConfig {
+            token: "new-token".into(),
+            ..GithubConfig::default()
+        });
+        let yaml = serde_yaml::to_string(&Config {
+            sync: Some(sync),
+            ..Config::default()
+        })
+        .unwrap();
+
+        assert!(!yaml.contains("owner:"));
+        assert!(!yaml.contains("repo:"));
+        assert!(!yaml.contains("branch:"));
+        assert!(!yaml.contains("\n  token:"));
+    }
+
+    #[test]
+    fn github_config_defaults_to_gist_api_and_description() {
+        let github = GithubConfig::default();
+
+        assert_eq!(github.api_base, "https://api.github.com");
+        assert_eq!(github.gist_description, "CopyTimeTrayConfig");
+    }
+
+    #[test]
+    fn github_token_prefers_provider_token_over_legacy_token() {
+        let sync = SyncConfig::github(GithubConfig {
+            token: "new-token".into(),
+            ..GithubConfig::default()
+        });
+        let sync = SyncConfig {
+            token: "legacy-token".into(),
+            ..sync
+        };
+
+        assert_eq!(sync.github_token(), "new-token");
+    }
+
+    #[test]
     fn test_load_no_config_returns_empty() {
         let (_config_dir, _temp) = temp_config_dir();
         let config_str = r#"sync: null"#;
@@ -448,6 +563,7 @@ sync:
                 repo: "repo".into(),
                 branch: "main".into(),
                 token: "token".into(),
+                github_config: GithubConfig::default(),
                 gitee_config: GiteeConfig::default(),
             }),
             general: GeneralConfig::default(),
@@ -473,14 +589,18 @@ sync:
     }
 
     #[test]
-    fn test_missing_required_field_fails() {
+    fn test_missing_legacy_repository_fields_default_to_empty() {
         let yaml = r#"
 sync:
   provider: github
-  owner: user
 "#;
-        let result: Result<Config, _> = serde_yaml::from_str(yaml);
-        assert!(result.is_err());
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let sync = config.sync.unwrap();
+
+        assert!(sync.owner.is_empty());
+        assert!(sync.repo.is_empty());
+        assert!(sync.branch.is_empty());
+        assert!(sync.token.is_empty());
     }
 
     #[test]

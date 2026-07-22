@@ -24,7 +24,6 @@ reqwest = { version = "0.12", features = ["blocking", "json"] }
 
 # Snippet feature - 工具库
 uuid = { version = "1", features = ["v4", "serde"] }
-sha2 = "0.10"
 base64 = "0.22"
 crossbeam-channel = "0.5"
 thiserror = "2"
