@@ -1,0 +1,29 @@
+<h2>JSON 文本框：等宽字体</h2>
+<p class="subtitle">预览将输入框与输出框都改为等宽字体后的阅读效果。</p>
+
+<div class="mockup">
+  <div class="mockup-header">JSON 格式化</div>
+  <div class="mockup-body" style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
+    <section>
+      <div class="label">输入 JSON</div>
+      <pre style="margin:8px 0 0;padding:16px;min-height:180px;border:1px solid #555;border-radius:8px;background:#1e1e1e;color:#d4d4d4;font:14px/1.55 monospace;white-space:pre-wrap;">{
+  "name": "Copy Time Tray",
+  "enabled": true,
+  "formats": ["pretty", "compact"]
+}</pre>
+    </section>
+    <section>
+      <div class="label">格式化结果</div>
+      <pre style="margin:8px 0 0;padding:16px;min-height:180px;border:1px solid #1b6a45;border-radius:8px;background:#1e1e1e;color:#d4d4d4;font:14px/1.55 monospace;white-space:pre-wrap;">{
+  "name": "Copy Time Tray",
+  "enabled": true,
+  "formats": [
+    "pretty",
+    "compact"
+  ]
+}</pre>
+    </section>
+  </div>
+</div>
+
+<p class="subtitle">这里仅讨论字体族；字号、颜色、边距和换行行为保持当前窗口样式不变。</p>

@@ -1,0 +1,37 @@
+<h2>收藏栏按钮名称截断方式</h2>
+<p class="subtitle">示例原名：数据库连接配置。按钮恢复显示名称，完整名称仍可通过鼠标悬停查看。</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image" style="display:flex;align-items:center;gap:8px;justify-content:center;min-height:110px;background:#f4f6f8">
+      <button style="padding:7px 11px;border:1px solid #b7bec8;border-radius:5px;background:white;font-size:16px;white-space:nowrap">数据库连…</button>
+      <button style="padding:7px 11px;border:1px solid #b7bec8;border-radius:5px;background:white;font-size:16px;white-space:nowrap">部署脚本</button>
+    </div>
+    <div class="card-body">
+      <h3>A · 前 4 个中文 + 省略号（推荐）</h3>
+      <p>最多保留 4 个中文字符，超长时追加“…”；识别度较高，但省略号会多占一点宽度。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image" style="display:flex;align-items:center;gap:8px;justify-content:center;min-height:110px;background:#f4f6f8">
+      <button style="padding:7px 11px;border:1px solid #b7bec8;border-radius:5px;background:white;font-size:16px;white-space:nowrap">数据库…</button>
+      <button style="padding:7px 11px;border:1px solid #b7bec8;border-radius:5px;background:white;font-size:16px;white-space:nowrap">部署脚本</button>
+    </div>
+    <div class="card-body">
+      <h3>B · 总显示宽度约 4 个中文</h3>
+      <p>超长时显示前 3 个中文加“…”；按钮最紧凑，但可见名称信息更少。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image" style="display:flex;align-items:center;gap:8px;justify-content:center;min-height:110px;background:#f4f6f8">
+      <button style="padding:7px 11px;border:1px solid #b7bec8;border-radius:5px;background:white;font-size:16px;white-space:nowrap">数据库连</button>
+      <button style="padding:7px 11px;border:1px solid #b7bec8;border-radius:5px;background:white;font-size:16px;white-space:nowrap">部署脚本</button>
+    </div>
+    <div class="card-body">
+      <h3>C · 直接截取前 4 个中文</h3>
+      <p>宽度最稳定，不显示省略号；但用户不容易判断名称是否被截断。</p>
+    </div>
+  </div>
+</div>

@@ -97,4 +97,4 @@ copy-time-tray/
 
 ## License
 
-MIT
+[GPL-3.0](LICENSE)

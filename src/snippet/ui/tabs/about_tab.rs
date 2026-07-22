@@ -42,15 +42,15 @@ impl ConfigTab for AboutTab {
         links_box.set_margin_top(16);
 
         let github_link = gtk::LinkButton::with_label(
-            "https://github.com/your-username/copy-time-tray",
-            "GitHub",
+            "https://gitee.com/andnnl/copy-time-tray",
+            "Gitee",
         );
         links_box.pack_start(&github_link, false, false, 0);
 
         container.pack_start(&links_box, false, false, 0);
 
         // License
-        let license_label = gtk::Label::new(Some("MIT License"));
+        let license_label = gtk::Label::new(Some("GPL-3.0"));
         license_label.set_halign(gtk::Align::Center);
         license_label.set_margin_top(16);
         container.pack_start(&license_label, false, false, 0);
