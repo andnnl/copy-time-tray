@@ -146,6 +146,7 @@ impl ConfigWindow {
             notify_on_failure: dialog.general_tab.notify_failure_switch.is_active(),
             notify_on_create: dialog.general_tab.notify_create_switch.is_active(),
             snippet_hotkey: dialog.general_tab.snippet_hotkey(),
+            json_hotkey: dialog.general_tab.json_hotkey(),
         };
         config
     }
@@ -174,7 +175,7 @@ impl ConfigWindow {
                 Ok(()) => {
                     dialog
                         .general_tab
-                        .show_success("快捷键绑定成功，配置已保存");
+                        .show_success("全局快捷键绑定成功，配置已保存");
                     dialog.window.hide();
                     return true;
                 }

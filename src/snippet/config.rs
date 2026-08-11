@@ -202,6 +202,8 @@ pub struct GeneralConfig {
     pub notify_on_create: bool,
     #[serde(default = "default_snippet_hotkey")]
     pub snippet_hotkey: String,
+    #[serde(default = "default_json_hotkey")]
+    pub json_hotkey: String,
 }
 
 fn default_true() -> bool {
@@ -210,6 +212,10 @@ fn default_true() -> bool {
 
 fn default_snippet_hotkey() -> String {
     "Ctrl+Shift+S".to_string()
+}
+
+fn default_json_hotkey() -> String {
+    "Ctrl+Shift+J".to_string()
 }
 
 impl Default for GeneralConfig {
@@ -221,6 +227,7 @@ impl Default for GeneralConfig {
             notify_on_failure: true,
             notify_on_create: true,
             snippet_hotkey: default_snippet_hotkey(),
+            json_hotkey: default_json_hotkey(),
         }
     }
 }
@@ -622,6 +629,7 @@ sync:
  "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.general.snippet_hotkey, "Ctrl+Shift+S");
+        assert_eq!(config.general.json_hotkey, "Ctrl+Shift+J");
     }
 
     #[test]
@@ -646,11 +654,13 @@ sync:
     fn snippet_hotkey_round_trips_through_yaml() {
         let mut config = Config::default();
         config.general.snippet_hotkey = "Alt+F8".to_string();
+        config.general.json_hotkey = "Ctrl+Alt+J".to_string();
 
         let yaml = serde_yaml::to_string(&config).unwrap();
         let restored: Config = serde_yaml::from_str(&yaml).unwrap();
 
         assert_eq!(restored.general.snippet_hotkey, "Alt+F8");
+        assert_eq!(restored.general.json_hotkey, "Ctrl+Alt+J");
     }
 
     #[test]

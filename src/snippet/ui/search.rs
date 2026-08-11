@@ -174,6 +174,7 @@ impl SearchPopup {
                         let action = self.show_window();
                         Self::apply_window_action(ctx, action);
                     }
+                    Ok(UiCommand::ShowJson) => {}
                     Ok(UiCommand::Hide) => {
                         self.persist_window_state(ctx, true);
                         let action = self.hide_window();

@@ -16,12 +16,23 @@ pub use crate::snippet::ui::{UiCommand, UiResponse};
 
 pub static MANAGER: OnceLock<Mutex<SnippetManager>> = OnceLock::new();
 #[cfg(target_os = "linux")]
-static HOTKEY_SERVICE: OnceLock<Mutex<HotkeyService>> = OnceLock::new();
+static HOTKEY_SERVICE: OnceLock<Mutex<HotkeyServices>> = OnceLock::new();
 #[cfg(target_os = "windows")]
 thread_local! {
-    static HOTKEY_SERVICE: RefCell<Option<HotkeyService>> = const { RefCell::new(None) };
+    static HOTKEY_SERVICE: RefCell<Option<HotkeyServices>> = const { RefCell::new(None) };
 }
-static HOTKEY_CURRENT_ID: AtomicU32 = AtomicU32::new(0);
+static SNIPPET_HOTKEY_ID: AtomicU32 = AtomicU32::new(0);
+static JSON_HOTKEY_ID: AtomicU32 = AtomicU32::new(0);
+
+struct HotkeyServices {
+    snippet: HotkeyService,
+    json: HotkeyService,
+}
+
+fn store_hotkey_ids(services: &HotkeyServices) {
+    SNIPPET_HOTKEY_ID.store(services.snippet.current_id(), Ordering::Release);
+    JSON_HOTKEY_ID.store(services.json.current_id(), Ordering::Release);
+}
 #[cfg(target_os = "windows")]
 static CMD_TX: OnceLock<crossbeam_channel::Sender<UiCommand>> = OnceLock::new();
 
@@ -100,26 +111,37 @@ pub fn send_refresh_to_search() {
     }
 }
 
-fn launch_global_hotkey(cmd_tx: crossbeam_channel::Sender<UiCommand>) -> Result<(), String> {
-    let configured = Config::load().unwrap_or_default().general.snippet_hotkey;
-    let initial = match configured.parse::<Shortcut>() {
-        Ok(shortcut) => shortcut,
+fn configured_shortcut(value: &str, fallback: &str, name: &str) -> Result<Shortcut, String> {
+    match value.parse::<Shortcut>() {
+        Ok(shortcut) => Ok(shortcut),
         Err(error) => {
-            let fallback = "Ctrl+Shift+S"
+            let fallback = fallback
                 .parse::<Shortcut>()
                 .map_err(|fallback_error| fallback_error.to_string())?;
             let _ = notify_rust::Notification::new()
                 .summary("快捷键配置无效")
-                .body(&format!("{error}，已临时使用 {fallback}"))
+                .body(&format!("{name}：{error}，已临时使用 {fallback}"))
                 .show();
-            fallback
+            Ok(fallback)
         }
+    }
+}
+
+fn launch_global_hotkey(cmd_tx: crossbeam_channel::Sender<UiCommand>) -> Result<(), String> {
+    let general = Config::load().unwrap_or_default().general;
+    let snippet = configured_shortcut(&general.snippet_hotkey, "Ctrl+Shift+S", "代码片段")?;
+    let json = configured_shortcut(&general.json_hotkey, "Ctrl+Shift+J", "JSON 对话框")?;
+    if snippet == json {
+        return Err("代码片段和 JSON 对话框不能使用相同快捷键".to_string());
+    }
+    let services = HotkeyServices {
+        snippet: HotkeyService::new(snippet).map_err(|error| error.to_string())?,
+        json: HotkeyService::new(json).map_err(|error| error.to_string())?,
     };
-    let service = HotkeyService::new(initial).map_err(|error| error.to_string())?;
-    HOTKEY_CURRENT_ID.store(service.current_id(), Ordering::Release);
+    store_hotkey_ids(&services);
     #[cfg(target_os = "linux")]
     HOTKEY_SERVICE
-        .set(Mutex::new(service))
+        .set(Mutex::new(services))
         .map_err(|_| "快捷键服务已初始化".to_string())?;
     #[cfg(target_os = "windows")]
     HOTKEY_SERVICE.with(|slot| {
@@ -127,7 +149,7 @@ fn launch_global_hotkey(cmd_tx: crossbeam_channel::Sender<UiCommand>) -> Result<
         if slot.is_some() {
             Err("快捷键服务已初始化".to_string())
         } else {
-            *slot = Some(service);
+            *slot = Some(services);
             Ok(())
         }
     })?;
@@ -135,10 +157,18 @@ fn launch_global_hotkey(cmd_tx: crossbeam_channel::Sender<UiCommand>) -> Result<
     let event_receiver = global_hotkey::GlobalHotKeyEvent::receiver();
     std::thread::spawn(move || loop {
         if let Ok(event) = event_receiver.recv() {
-            let current_id = HOTKEY_CURRENT_ID.load(Ordering::Acquire);
-            let matches = should_open_snippets(current_id, event.id, event.state);
-            if matches {
+            if should_open_snippets(
+                SNIPPET_HOTKEY_ID.load(Ordering::Acquire),
+                event.id,
+                event.state,
+            ) {
                 let _ = cmd_tx.send(UiCommand::Show);
+            } else if should_open_snippets(
+                JSON_HOTKEY_ID.load(Ordering::Acquire),
+                event.id,
+                event.state,
+            ) {
+                let _ = cmd_tx.send(UiCommand::ShowJson);
             }
         }
     });
@@ -147,44 +177,61 @@ fn launch_global_hotkey(cmd_tx: crossbeam_channel::Sender<UiCommand>) -> Result<
 
 fn apply_config_with_service(
     mut config: Config,
-    service: &mut HotkeyService,
+    services: &mut HotkeyServices,
 ) -> Result<(), String> {
-    let candidate = config
+    let snippet_candidate = config
         .general
         .snippet_hotkey
         .parse::<Shortcut>()
         .map_err(|error| error.to_string())?;
-    config.general.snippet_hotkey = candidate.to_string();
-    let previous_config = Config::load().map_err(|error| error.to_string())?;
-    let previous_shortcut = service.current();
-
-    service
-        .rebind(candidate)
+    let json_candidate = config
+        .general
+        .json_hotkey
+        .parse::<Shortcut>()
         .map_err(|error| error.to_string())?;
-    HOTKEY_CURRENT_ID.store(service.current_id(), Ordering::Release);
-    if let Err(error) = config.save() {
-        return match service.rebind(previous_shortcut) {
-            Ok(()) => {
-                HOTKEY_CURRENT_ID.store(service.current_id(), Ordering::Release);
-                Err(format!("配置保存失败：{error}"))
+    if snippet_candidate == json_candidate {
+        return Err("代码片段和 JSON 对话框不能使用相同快捷键".to_string());
+    }
+    config.general.snippet_hotkey = snippet_candidate.to_string();
+    config.general.json_hotkey = json_candidate.to_string();
+    let previous_config = Config::load().map_err(|error| error.to_string())?;
+    let previous_snippet = services.snippet.current();
+    let previous_json = services.json.current();
+
+    services
+        .snippet
+        .rebind(snippet_candidate)
+        .map_err(|error| format!("代码片段快捷键绑定失败：{error}"))?;
+    if let Err(error) = services.json.rebind(json_candidate) {
+        let rollback = services.snippet.rebind(previous_snippet);
+        store_hotkey_ids(services);
+        return Err(match rollback {
+            Ok(()) => format!("JSON 快捷键绑定失败：{error}"),
+            Err(rollback_error) => {
+                format!("JSON 快捷键绑定失败：{error}；代码片段快捷键回滚失败：{rollback_error}")
             }
-            Err(rollback_error) => Err(format!(
-                "配置保存失败：{error}；快捷键回滚失败：{rollback_error}"
-            )),
-        };
+        });
+    }
+    store_hotkey_ids(services);
+
+    if let Err(error) = config.save() {
+        let snippet_rollback = services.snippet.rebind(previous_snippet);
+        let json_rollback = services.json.rebind(previous_json);
+        store_hotkey_ids(services);
+        return Err(format!(
+            "配置保存失败：{error}；快捷键回滚结果：代码片段 {snippet_rollback:?}，JSON {json_rollback:?}"
+        ));
     }
 
     if let Some(mut manager) = MANAGER.get().and_then(|manager| manager.lock().ok()) {
         if let Err(error) = manager.reload_config() {
             let restore_config_result = previous_config.save();
-            let restore_hotkey_result = service.rebind(previous_shortcut);
-            HOTKEY_CURRENT_ID.store(service.current_id(), Ordering::Release);
-            return Err(match (restore_config_result, restore_hotkey_result) {
-                (Ok(()), Ok(())) => format!("配置应用失败：{error}"),
-                (config_result, hotkey_result) => format!(
-                    "配置应用失败：{error}；配置回滚结果：{config_result:?}；快捷键回滚结果：{hotkey_result:?}"
-                ),
-            });
+            let snippet_rollback = services.snippet.rebind(previous_snippet);
+            let json_rollback = services.json.rebind(previous_json);
+            store_hotkey_ids(services);
+            return Err(format!(
+                "配置应用失败：{error}；配置回滚结果：{restore_config_result:?}；快捷键回滚结果：代码片段 {snippet_rollback:?}，JSON {json_rollback:?}"
+            ));
         }
         manager.schedule_push();
     }
@@ -293,7 +340,9 @@ fn launch_egui(
     let popup_tx_clone = popup_tx.clone();
     std::thread::spawn(move || {
         while let Ok(command) = cmd_rx.recv() {
-            if let Some(sender) = popup_tx_clone.lock().unwrap().as_ref() {
+            if matches!(command, UiCommand::ShowJson) {
+                crate::platform::windows::launch_json_formatter();
+            } else if let Some(sender) = popup_tx_clone.lock().unwrap().as_ref() {
                 let _ = sender.send(command);
             }
         }

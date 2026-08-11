@@ -5,6 +5,15 @@ const JSON_EDITOR_MIN_HEIGHT: f32 = 180.0;
 const JSON_EDITOR_RESERVED_HEIGHT: f32 = 140.0;
 const JSON_FORMATTER_MIN_WINDOW_HEIGHT: f32 = 360.0;
 
+pub fn line_numbers(text: &str) -> String {
+    let line_count = text.split('\n').count();
+    let width = line_count.to_string().len();
+    (1..=line_count)
+        .map(|line| format!("{line:>width$}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum JsonFormat {
     #[default]
@@ -66,8 +75,8 @@ pub const fn json_formatter_min_window_height() -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_json, json_editor_height, json_formatter_min_window_height, JsonFormat,
-        JSON_EDITOR_MIN_HEIGHT, JSON_EDITOR_RESERVED_HEIGHT,
+        format_json, json_editor_height, json_formatter_min_window_height, line_numbers,
+        JsonFormat, JSON_EDITOR_MIN_HEIGHT, JSON_EDITOR_RESERVED_HEIGHT,
     };
 
     #[test]
@@ -144,5 +153,20 @@ mod tests {
             JsonFormat::ALL.map(JsonFormat::label),
             ["4 空格美化", "2 空格美化", "压缩单行", "转义为 JSON 字符串",]
         );
+    }
+
+    #[test]
+    fn line_numbers_cover_empty_single_and_multiline_text() {
+        assert_eq!(line_numbers(""), "1");
+        assert_eq!(line_numbers("{}"), "1");
+        assert_eq!(line_numbers("{\n  \"a\": 1\n}"), "1\n2\n3");
+        assert_eq!(line_numbers("{}\n"), "1\n2");
+    }
+
+    #[test]
+    fn line_numbers_align_to_the_largest_number() {
+        let text = (0..12).map(|_| "x").collect::<Vec<_>>().join("\n");
+        assert!(line_numbers(&text).starts_with(" 1\n 2"));
+        assert!(line_numbers(&text).ends_with("\n12"));
     }
 }

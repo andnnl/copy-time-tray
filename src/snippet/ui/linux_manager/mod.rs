@@ -41,11 +41,22 @@ fn apply_favorite_button_style(button: &gtk::Button) {
 }
 
 fn favorite_chip_label(name: &str) -> String {
-    let truncated = name.chars().take(4).collect::<String>();
-    if name.chars().count() > 4 {
-        format!("{truncated}…")
+    let mut result = String::new();
+    let mut width = 0;
+
+    for ch in name.chars() {
+        let char_width = if ch.is_ascii() { 1 } else { 2 };
+        if width + char_width > 8 {
+            break;
+        }
+        result.push(ch);
+        width += char_width;
+    }
+
+    if width < name.chars().fold(0, |acc, ch| acc + if ch.is_ascii() { 1 } else { 2 }) {
+        format!("{result}…")
     } else {
-        truncated
+        result
     }
 }
 
@@ -1336,11 +1347,15 @@ mod tests {
     }
 
     #[test]
-    fn favorite_bar_truncates_long_names_after_four_unicode_characters() {
+    fn favorite_bar_truncates_long_names_after_eight_display_width() {
         assert_eq!(favorite_button_width(), 40);
+        // 中文算2个宽度，8个宽度 = 4个中文字符
         assert_eq!(favorite_chip_label("一个很长的收藏名称"), "一个很长…");
         assert_eq!(favorite_chip_label("四个字符"), "四个字符");
-        assert_eq!(favorite_chip_label("abcde"), "abcd…");
+        // 英文算1个宽度，8个宽度 = 8个英文字符
+        assert_eq!(favorite_chip_label("abcde"), "abcde");
+        assert_eq!(favorite_chip_label("abcdefghij"), "abcdefgh…");
+        // emoji算2个宽度
         assert_eq!(favorite_chip_label("😀😃😄😁😆"), "😀😃😄😁…");
     }
 

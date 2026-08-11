@@ -15,6 +15,7 @@ pub mod tabs;
 #[derive(Debug, Clone)]
 pub enum UiCommand {
     Show,
+    ShowJson,
     Hide,
     CopyToClipboard(String),
     RefreshSnippets(Vec<Snippet>),

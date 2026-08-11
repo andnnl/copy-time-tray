@@ -18,11 +18,12 @@ pub enum SyncError {
     Parse(String),
     Config(String),
     Store(String),
+    PermissionDenied(String),
 }
 
 impl SyncError {
     pub fn is_authentication_failure(&self) -> bool {
-        matches!(self, Self::Auth(_))
+        matches!(self, Self::Auth(_) | Self::PermissionDenied(_))
     }
 }
 
@@ -45,6 +46,7 @@ impl std::fmt::Display for SyncError {
             SyncError::Parse(e) => write!(f, "Parse error: {e}"),
             SyncError::Config(e) => write!(f, "Config error: {e}"),
             SyncError::Store(e) => write!(f, "Store error: {e}"),
+            SyncError::PermissionDenied(e) => write!(f, "{e}"),
         }
     }
 }
@@ -269,19 +271,29 @@ fn push_to_github_gist(config: &SyncConfig, snippets: &[Snippet]) -> Result<Stri
     Ok(gist_id)
 }
 
+fn github_gist_scope_error(error: GithubError) -> SyncError {
+    if matches!(error, GithubError::NotFound) {
+        SyncError::PermissionDenied(
+            "GitHub Gist API 返回404，请检查Token是否已勾选 gist 权限。前往 https://github.com/settings/tokens 编辑Token，勾选 gist scope".into(),
+        )
+    } else {
+        github_error(error)
+    }
+}
+
 fn select_or_create_github_gist(
     client: &GithubClient,
     config: &crate::snippet::config::GithubConfig,
     tree_json: &str,
 ) -> Result<String, SyncError> {
-    let gists = client.list_gists().map_err(github_error)?;
+    let gists = client.list_gists().map_err(github_gist_scope_error)?;
     if let Some(id) = find_reusable_gist_id(&gists, &config.gist_description) {
         return Ok(id);
     }
     client
         .create_private_gist(&config.gist_description, tree_json)
         .map(|gist| gist.id)
-        .map_err(github_error)
+        .map_err(github_gist_scope_error)
 }
 
 fn github_client(config: &SyncConfig) -> GithubClient {

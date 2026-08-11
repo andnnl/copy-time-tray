@@ -1,5 +1,5 @@
 use crate::app::MANAGER;
-use crate::json_formatter::{format_json, JsonFormat};
+use crate::json_formatter::{format_json, line_numbers, JsonFormat};
 use crate::menu_order::{linux_menu_order, MenuEntry};
 use crate::snippet::ui::UiCommand;
 use crate::utilities::{generate_md5, generate_password, get_time_text};
@@ -124,25 +124,72 @@ fn show_json_formatter() {
     let input_buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
     input_view.set_buffer(Some(&input_buffer));
     input_view.set_monospace(true);
-    input_view.set_wrap_mode(gtk::WrapMode::WordChar);
+    input_view.set_wrap_mode(gtk::WrapMode::None);
+    input_view.set_hexpand(true);
     let output_view = TextView::new();
     let output_buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
     output_view.set_buffer(Some(&output_buffer));
     output_view.set_monospace(true);
     output_view.set_editable(false);
     output_view.set_cursor_visible(false);
-    output_view.set_wrap_mode(gtk::WrapMode::WordChar);
+    output_view.set_wrap_mode(gtk::WrapMode::None);
+    output_view.set_hexpand(true);
+
+    let input_lines = TextView::new();
+    let input_lines_buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
+    input_lines.set_buffer(Some(&input_lines_buffer));
+    input_lines_buffer.set_text("1");
+    input_lines.set_monospace(true);
+    input_lines.set_editable(false);
+    input_lines.set_cursor_visible(false);
+    input_lines.set_wrap_mode(gtk::WrapMode::None);
+    input_lines.set_sensitive(false);
+
+    let output_lines = TextView::new();
+    let output_lines_buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
+    output_lines.set_buffer(Some(&output_lines_buffer));
+    output_lines_buffer.set_text("1");
+    output_lines.set_monospace(true);
+    output_lines.set_editable(false);
+    output_lines.set_cursor_visible(false);
+    output_lines.set_wrap_mode(gtk::WrapMode::None);
+    output_lines.set_sensitive(false);
+
+    input_buffer.connect_changed({
+        let input_lines_buffer = input_lines_buffer.clone();
+        move |buffer| {
+            let text = buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), true)
+                .unwrap_or_default();
+            input_lines_buffer.set_text(&line_numbers(&text));
+        }
+    });
+    output_buffer.connect_changed({
+        let output_lines_buffer = output_lines_buffer.clone();
+        move |buffer| {
+            let text = buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), true)
+                .unwrap_or_default();
+            output_lines_buffer.set_text(&line_numbers(&text));
+        }
+    });
 
     let input_column = gtk::Box::new(Orientation::Vertical, 6);
     input_column.pack_start(&Label::new(Some("输入 JSON")), false, false, 0);
     let input_scroll = ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
-    input_scroll.add(&input_view);
+    let input_editor = gtk::Box::new(Orientation::Horizontal, 8);
+    input_editor.pack_start(&input_lines, false, false, 4);
+    input_editor.pack_start(&input_view, true, true, 0);
+    input_scroll.add(&input_editor);
     input_column.pack_start(&input_scroll, true, true, 0);
 
     let output_column = gtk::Box::new(Orientation::Vertical, 6);
     output_column.pack_start(&Label::new(Some("格式化结果")), false, false, 0);
     let output_scroll = ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
-    output_scroll.add(&output_view);
+    let output_editor = gtk::Box::new(Orientation::Horizontal, 8);
+    output_editor.pack_start(&output_lines, false, false, 4);
+    output_editor.pack_start(&output_view, true, true, 0);
+    output_scroll.add(&output_editor);
     output_column.pack_start(&output_scroll, true, true, 0);
 
     let columns = Paned::new(Orientation::Horizontal);
@@ -154,16 +201,17 @@ fn show_json_formatter() {
     status_label.set_xalign(0.0);
     status_label.set_line_wrap(true);
     content.pack_start(&status_label, false, false, 0);
-
     let button_row = gtk::Box::new(Orientation::Horizontal, 6);
     let paste_button = Button::with_label("从剪贴板粘贴");
     let format_button = Button::with_label("格式化");
     let copy_button = Button::with_label("复制结果");
     copy_button.set_sensitive(false);
+    let clear_button = Button::with_label("清除");
     let close_button = Button::with_label("关闭");
     button_row.pack_start(&paste_button, false, false, 0);
     button_row.pack_start(&format_button, false, false, 0);
     button_row.pack_start(&copy_button, false, false, 0);
+    button_row.pack_start(&clear_button, false, false, 0);
     button_row.pack_end(&close_button, false, false, 0);
     content.pack_start(&button_row, false, false, 0);
 
@@ -228,6 +276,18 @@ fn show_json_formatter() {
         }
     });
 
+    clear_button.connect_clicked(glib::clone!(
+        @strong input_buffer,
+        @strong output_buffer,
+        @strong status_label,
+        @strong copy_button => move |_| {
+            input_buffer.set_text("");
+            output_buffer.set_text("");
+            copy_button.set_sensitive(false);
+            status_label.set_text("已清除输入和结果");
+        }
+    ));
+
     close_button.connect_clicked({
         let dialog = dialog.clone();
         move |_| dialog.close()
@@ -249,6 +309,7 @@ pub fn main(
         while let Ok(command) = cmd_rx.try_recv() {
             match command {
                 UiCommand::Show => crate::snippet::ui::linux_manager::show(),
+                UiCommand::ShowJson => show_json_formatter(),
                 UiCommand::Sync => {
                     std::thread::spawn(|| {
                         if let Some(mut manager) =

@@ -16,6 +16,10 @@ pub struct GeneralTab {
     hotkey_status: gtk::Label,
     hotkey_candidate: Rc<RefCell<Shortcut>>,
     capture_active: Rc<Cell<bool>>,
+    json_hotkey_button: gtk::Button,
+    json_hotkey_status: gtk::Label,
+    json_hotkey_candidate: Rc<RefCell<Shortcut>>,
+    json_capture_active: Rc<Cell<bool>>,
 }
 
 impl GeneralTab {
@@ -89,6 +93,59 @@ impl GeneralTab {
             }
         });
 
+        let initial_json_hotkey = Config::load()
+            .unwrap_or_default()
+            .general
+            .json_hotkey
+            .parse::<Shortcut>()
+            .unwrap_or_else(|_| "Ctrl+Shift+J".parse().expect("default shortcut must parse"));
+        let json_hotkey_button = gtk::Button::with_label(&initial_json_hotkey.to_string());
+        json_hotkey_button.set_can_focus(true);
+        let json_hotkey_status = gtk::Label::new(Some("点击后按下新快捷键；Esc 取消"));
+        json_hotkey_status.set_xalign(0.0);
+        let json_hotkey_candidate = Rc::new(RefCell::new(initial_json_hotkey));
+        let json_capture_active = Rc::new(Cell::new(false));
+
+        json_hotkey_button.connect_clicked({
+            let json_capture_active = json_capture_active.clone();
+            move |button| {
+                json_capture_active.set(true);
+                button.set_label("请按下快捷键…");
+                button.grab_focus();
+            }
+        });
+        json_hotkey_button.connect_key_press_event({
+            let json_capture_active = json_capture_active.clone();
+            let json_hotkey_candidate = json_hotkey_candidate.clone();
+            let json_hotkey_status = json_hotkey_status.clone();
+            move |button, event| {
+                if !json_capture_active.get() {
+                    return gtk::glib::Propagation::Proceed;
+                }
+                let key_name = event
+                    .keyval()
+                    .name()
+                    .map(|name| name.to_string())
+                    .unwrap_or_default();
+                match capture_from_gdk(&key_name, event.state()) {
+                    Ok(CaptureResult::Updated(shortcut)) => {
+                        *json_hotkey_candidate.borrow_mut() = shortcut;
+                        json_capture_active.set(false);
+                        button.set_label(&shortcut.to_string());
+                        set_status(&json_hotkey_status, "#2e7d32", "快捷键待保存");
+                    }
+                    Ok(CaptureResult::Cancelled) => {
+                        json_capture_active.set(false);
+                        button.set_label(&json_hotkey_candidate.borrow().to_string());
+                        set_status(&json_hotkey_status, "#666666", "已取消快捷键捕获");
+                    }
+                    Ok(CaptureResult::Ignored) => {}
+                    Err(error) => set_status(&json_hotkey_status, "#c62828", &error.to_string()),
+                }
+                gtk::glib::Propagation::Stop
+            }
+        });
+
         Self {
             auto_sync_switch,
             sync_interval_entry,
@@ -99,6 +156,10 @@ impl GeneralTab {
             hotkey_status,
             hotkey_candidate,
             capture_active,
+            json_hotkey_button,
+            json_hotkey_status,
+            json_hotkey_candidate,
+            json_capture_active,
         }
     }
 
@@ -113,6 +174,10 @@ impl GeneralTab {
 
     pub fn snippet_hotkey(&self) -> String {
         self.hotkey_candidate.borrow().to_string()
+    }
+
+    pub fn json_hotkey(&self) -> String {
+        self.json_hotkey_candidate.borrow().to_string()
     }
 
     pub fn show_success(&self, message: &str) {
@@ -300,6 +365,17 @@ impl ConfigTab for GeneralTab {
         hotkey_box.pack_start(&self.hotkey_status, false, false, 0);
         hotkey_frame.add(&hotkey_box);
         container.pack_start(&hotkey_frame, false, false, 0);
+
+        let json_hotkey_frame = gtk::Frame::new(Some("JSON 对话框快捷键"));
+        let json_hotkey_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        json_hotkey_box.set_margin_top(8);
+        json_hotkey_box.set_margin_bottom(8);
+        json_hotkey_box.set_margin_start(8);
+        json_hotkey_box.set_margin_end(8);
+        json_hotkey_box.pack_start(&self.json_hotkey_button, false, false, 0);
+        json_hotkey_box.pack_start(&self.json_hotkey_status, false, false, 0);
+        json_hotkey_frame.add(&json_hotkey_box);
+        container.pack_start(&json_hotkey_frame, false, false, 0);
     }
 
     fn on_save(&self) -> Result<(), String> {
@@ -313,6 +389,13 @@ impl ConfigTab for GeneralTab {
         self.snippet_hotkey()
             .parse::<Shortcut>()
             .map_err(|error| error.to_string())?;
+        let json_hotkey = self
+            .json_hotkey()
+            .parse::<Shortcut>()
+            .map_err(|error| error.to_string())?;
+        if self.snippet_hotkey() == json_hotkey.to_string() {
+            return Err("代码片段和 JSON 对话框不能使用相同快捷键".to_string());
+        }
         Ok(())
     }
 
@@ -333,9 +416,20 @@ impl ConfigTab for GeneralTab {
             *self.hotkey_candidate.borrow_mut() = shortcut;
             self.hotkey_button.set_label(&shortcut.to_string());
         } else {
-            self.show_error("当前快捷键配置无效，请重新设置");
+            self.show_error("当前代码片段快捷键配置无效，请重新设置");
+        }
+        if let Ok(shortcut) = general.json_hotkey.parse::<Shortcut>() {
+            *self.json_hotkey_candidate.borrow_mut() = shortcut;
+            self.json_hotkey_button.set_label(&shortcut.to_string());
+        } else {
+            set_status(
+                &self.json_hotkey_status,
+                "#c62828",
+                "当前 JSON 快捷键配置无效，请重新设置",
+            );
         }
         self.capture_active.set(false);
+        self.json_capture_active.set(false);
     }
 }
 

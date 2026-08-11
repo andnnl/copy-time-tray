@@ -4,7 +4,7 @@ use crate::hotkey::{
     Shortcut,
 };
 use crate::json_formatter::{
-    format_json, json_editor_height, json_formatter_min_window_height, JsonFormat,
+    format_json, json_editor_height, json_formatter_min_window_height, line_numbers, JsonFormat,
 };
 use crate::menu_order::{windows_menu_order, MenuEntry};
 use crate::snippet::config::Config;
@@ -54,6 +54,86 @@ impl Default for JsonFormatterApp {
     }
 }
 
+impl JsonFormatterApp {
+    fn paste(&mut self) {
+        if let Ok(mut clipboard) = Clipboard::new() {
+            if let Ok(text) = clipboard.get_text() {
+                self.input = text;
+                self.error = None;
+                self.status = Some("已从剪贴板载入输入".to_string());
+            } else {
+                self.error = Some("无法读取剪贴板文本".to_string());
+                self.status = None;
+            }
+        } else {
+            self.error = Some("无法打开剪贴板".to_string());
+            self.status = None;
+        }
+    }
+
+    fn format(&mut self) {
+        match format_json(&self.input, self.format) {
+            Ok(output) => {
+                self.output = output;
+                self.error = None;
+                self.status = Some("格式化成功".to_string());
+            }
+            Err(error) => {
+                self.error = Some(error.to_string());
+                self.status = None;
+            }
+        }
+    }
+
+    fn copy(&mut self) {
+        if self.output.is_empty() {
+            return;
+        }
+        if let Ok(mut clipboard) = Clipboard::new() {
+            if clipboard.set_text(&self.output).is_ok() {
+                self.error = None;
+                self.status = Some("已复制格式化结果".to_string());
+            } else {
+                self.error = Some("无法设置剪贴板文本".to_string());
+                self.status = None;
+            }
+        } else {
+            self.error = Some("无法打开剪贴板".to_string());
+            self.status = None;
+        }
+    }
+
+    fn clear(&mut self) {
+        self.input.clear();
+        self.output.clear();
+        self.error = None;
+        self.status = Some("已清除输入和结果".to_string());
+    }
+}
+
+fn numbered_text_editor(ui: &mut egui::Ui, text: &mut String, interactive: bool, height: f32) {
+    let numbers = line_numbers(text);
+    egui::ScrollArea::both()
+        .auto_shrink([false, false])
+        .max_height(height)
+        .show(ui, |ui| {
+            ui.horizontal_top(|ui| {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(numbers).monospace().weak())
+                        .selectable(false),
+                );
+                ui.separator();
+                ui.add_sized(
+                    [ui.available_width(), height],
+                    egui::TextEdit::multiline(text)
+                        .font(egui::TextStyle::Monospace)
+                        .interactive(interactive)
+                        .desired_width(f32::INFINITY),
+                );
+            });
+        });
+}
+
 static JSON_WINDOW_OPEN: AtomicBool = AtomicBool::new(false);
 
 struct JsonWindowGuard;
@@ -64,7 +144,7 @@ impl Drop for JsonWindowGuard {
     }
 }
 
-fn launch_json_formatter() {
+pub(crate) fn launch_json_formatter() {
     if JSON_WINDOW_OPEN
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
@@ -107,72 +187,29 @@ impl eframe::App for JsonFormatterApp {
 
             ui.columns(2, |columns| {
                 columns[0].heading("输入");
-                columns[0].add_sized(
-                    [0.0, editor_height],
-                    egui::TextEdit::multiline(&mut self.input).desired_width(f32::INFINITY),
-                );
+                numbered_text_editor(&mut columns[0], &mut self.input, true, editor_height);
 
                 columns[1].heading("输出");
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .max_height(editor_height)
-                    .show(&mut columns[1], |ui| {
-                        ui.add_sized(
-                            [0.0, editor_height],
-                            egui::TextEdit::multiline(&mut self.output)
-                                .interactive(false)
-                                .desired_width(f32::INFINITY),
-                        );
-                    });
+                numbered_text_editor(&mut columns[1], &mut self.output, false, editor_height);
             });
 
             ui.separator();
             ui.horizontal(|ui| {
                 if ui.button("从剪贴板粘贴").clicked() {
-                    if let Ok(mut clipboard) = Clipboard::new() {
-                        if let Ok(text) = clipboard.get_text() {
-                            self.input = text;
-                            self.error = None;
-                            self.status = None;
-                        } else {
-                            self.error = Some("无法读取剪贴板文本".to_string());
-                            self.status = None;
-                        }
-                    } else {
-                        self.error = Some("无法打开剪贴板".to_string());
-                        self.status = None;
-                    }
+                    self.paste();
                 }
                 if ui.button("格式化").clicked() {
-                    match format_json(&self.input, self.format) {
-                        Ok(output) => {
-                            self.output = output;
-                            self.error = None;
-                            self.status = Some("格式化成功".to_string());
-                        }
-                        Err(e) => {
-                            self.error = Some(e.to_string());
-                            self.status = None;
-                        }
-                    }
+                    self.format();
                 }
                 let copy_enabled = !self.output.is_empty();
                 ui.add_enabled_ui(copy_enabled, |ui| {
                     if ui.button("复制结果").clicked() {
-                        if let Ok(mut clipboard) = Clipboard::new() {
-                            if clipboard.set_text(&self.output).is_ok() {
-                                self.error = None;
-                                self.status = Some("已复制格式化结果".to_string());
-                            } else {
-                                self.error = Some("无法设置剪贴板文本".to_string());
-                                self.status = None;
-                            }
-                        } else {
-                            self.error = Some("无法打开剪贴板".to_string());
-                            self.status = None;
-                        }
+                        self.copy();
                     }
                 });
+                if ui.button("清除").clicked() {
+                    self.clear();
+                }
                 if ui.button("关闭").clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
@@ -201,25 +238,28 @@ impl Drop for ConfigWindowGuard {
 
 struct HotkeySettingsApp {
     config: Config,
-    state: HotkeySettingsState,
+    snippet_state: HotkeySettingsState,
+    json_state: HotkeySettingsState,
     apply_tx: crossbeam_channel::Sender<ConfigApplyRequest>,
 }
 
 impl HotkeySettingsApp {
     fn new(
         config: Config,
-        current: Shortcut,
+        snippet_current: Shortcut,
+        json_current: Shortcut,
         apply_tx: crossbeam_channel::Sender<ConfigApplyRequest>,
     ) -> Self {
         Self {
             config,
-            state: HotkeySettingsState::new(current),
+            snippet_state: HotkeySettingsState::new(snippet_current),
+            json_state: HotkeySettingsState::new(json_current),
             apply_tx,
         }
     }
 
     fn process_capture_events(&mut self, ctx: &egui::Context) {
-        if !self.state.is_capturing() {
+        if !self.snippet_state.is_capturing() && !self.json_state.is_capturing() {
             return;
         }
         let events = ctx.input(|input| input.events.clone());
@@ -234,30 +274,42 @@ impl HotkeySettingsApp {
             else {
                 continue;
             };
-            self.state.handle_capture(capture_from_egui(modifiers, key));
+            let result = capture_from_egui(modifiers, key);
+            if self.snippet_state.is_capturing() {
+                self.snippet_state.handle_capture(result);
+            } else {
+                self.json_state.handle_capture(result);
+            }
             break;
         }
     }
 
     fn apply(&mut self) -> bool {
         let mut candidate_config = self.config.clone();
-        candidate_config.general.snippet_hotkey = self.state.candidate().to_string();
+        candidate_config.general.snippet_hotkey = self.snippet_state.candidate().to_string();
+        candidate_config.general.json_hotkey = self.json_state.candidate().to_string();
+        if candidate_config.general.snippet_hotkey == candidate_config.general.json_hotkey {
+            self.json_state
+                .mark_failure("代码片段和 JSON 对话框不能使用相同快捷键");
+            return false;
+        }
         let (response_tx, response_rx) = crossbeam_channel::bounded(1);
         if self.apply_tx.send((candidate_config, response_tx)).is_err() {
-            self.state.mark_failure("无法连接配置应用服务");
+            self.snippet_state.mark_failure("无法连接配置应用服务");
             return false;
         }
         match response_rx.recv_timeout(Duration::from_secs(10)) {
             Ok(Ok(())) => {
-                self.state.mark_success();
+                self.snippet_state.mark_success();
+                self.json_state.mark_success();
                 true
             }
             Ok(Err(error)) => {
-                self.state.mark_failure(error);
+                self.snippet_state.mark_failure(error);
                 false
             }
             Err(_) => {
-                self.state.mark_failure("配置应用超时，请重试");
+                self.snippet_state.mark_failure("配置应用超时，请重试");
                 false
             }
         }
@@ -268,45 +320,20 @@ impl eframe::App for HotkeySettingsApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_capture_events(ctx);
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("代码片段快捷键");
+            ui.heading("全局快捷键");
             ui.label("F1-F12 可单独使用；其他按键必须包含 Ctrl、Alt 或 Win。");
             ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                ui.label("当前绑定：");
-                ui.strong(self.state.current().to_string());
-            });
-            ui.horizontal(|ui| {
-                ui.label("候选绑定：");
-                ui.strong(self.state.candidate().to_string());
-            });
-            ui.add_space(8.0);
-            let capture_label = if self.state.is_capturing() {
-                "请按下快捷键（Esc 取消）"
-            } else {
-                "按下新快捷键"
-            };
-            if ui.button(capture_label).clicked() {
-                self.state.begin_capture();
-            }
 
-            if let Some(status) = self.state.status() {
-                ui.add_space(8.0);
-                match status {
-                    HotkeySettingsStatus::Success => {
-                        ui.colored_label(egui::Color32::DARK_GREEN, "绑定成功");
-                    }
-                    HotkeySettingsStatus::Error(message) => {
-                        ui.colored_label(egui::Color32::RED, message);
-                    }
-                }
-            }
+            shortcut_setting_ui(ui, "代码片段", &mut self.snippet_state);
+            ui.separator();
+            shortcut_setting_ui(ui, "JSON 对话框", &mut self.json_state);
 
             ui.add_space(16.0);
             ui.horizontal(|ui| {
                 if ui.button("保存").clicked() && self.apply() {
                     let _ = Notification::new()
                         .summary("配置已保存")
-                        .body(&format!("代码片段快捷键已绑定为 {}", self.state.current()))
+                        .body("代码片段和 JSON 对话框快捷键已更新")
                         .show();
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
@@ -315,6 +342,36 @@ impl eframe::App for HotkeySettingsApp {
                 }
             });
         });
+    }
+}
+
+fn shortcut_setting_ui(ui: &mut egui::Ui, label: &str, state: &mut HotkeySettingsState) {
+    ui.strong(label);
+    ui.horizontal(|ui| {
+        ui.label("当前绑定：");
+        ui.strong(state.current().to_string());
+    });
+    ui.horizontal(|ui| {
+        ui.label("候选绑定：");
+        ui.strong(state.candidate().to_string());
+    });
+    let capture_label = if state.is_capturing() {
+        "请按下快捷键（Esc 取消）"
+    } else {
+        "按下新快捷键"
+    };
+    if ui.button(capture_label).clicked() {
+        state.begin_capture();
+    }
+    if let Some(status) = state.status() {
+        match status {
+            HotkeySettingsStatus::Success => {
+                ui.colored_label(egui::Color32::DARK_GREEN, "绑定成功");
+            }
+            HotkeySettingsStatus::Error(message) => {
+                ui.colored_label(egui::Color32::RED, message);
+            }
+        }
     }
 }
 
@@ -328,11 +385,21 @@ fn launch_hotkey_settings(apply_tx: crossbeam_channel::Sender<ConfigApplyRequest
     std::thread::spawn(move || {
         let _guard = ConfigWindowGuard;
         let config = Config::load().unwrap_or_default();
-        let current = match config.general.snippet_hotkey.parse::<Shortcut>() {
+        let snippet_current = match config.general.snippet_hotkey.parse::<Shortcut>() {
             Ok(shortcut) => shortcut,
             Err(error) => {
                 let _ = Notification::new()
-                    .summary("快捷键配置无效")
+                    .summary("代码片段快捷键配置无效")
+                    .body(&error.to_string())
+                    .show();
+                return;
+            }
+        };
+        let json_current = match config.general.json_hotkey.parse::<Shortcut>() {
+            Ok(shortcut) => shortcut,
+            Err(error) => {
+                let _ = Notification::new()
+                    .summary("JSON 快捷键配置无效")
                     .body(&error.to_string())
                     .show();
                 return;
@@ -340,14 +407,21 @@ fn launch_hotkey_settings(apply_tx: crossbeam_channel::Sender<ConfigApplyRequest
         };
         let native_options = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([460.0, 280.0])
+                .with_inner_size([500.0, 460.0])
                 .with_resizable(false),
             ..Default::default()
         };
         let _ = eframe::run_native(
             "Copy Time Tray - 配置",
             native_options,
-            Box::new(move |_cc| Ok(Box::new(HotkeySettingsApp::new(config, current, apply_tx)))),
+            Box::new(move |_cc| {
+                Ok(Box::new(HotkeySettingsApp::new(
+                    config,
+                    snippet_current,
+                    json_current,
+                    apply_tx,
+                )))
+            }),
         );
     });
 }
