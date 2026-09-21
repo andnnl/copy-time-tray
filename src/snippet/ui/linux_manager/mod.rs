@@ -536,7 +536,7 @@ pub fn show() {
     hpaned.pack2(&right_box, true, true);
     vbox.pack_start(&hpaned, true, true, 0);
 
-    let new_button = gtk::Button::with_label("新增 Snippet");
+    let new_button = gtk::Button::with_label("新增片段");
     new_button.style_context().add_class("suggested-action");
     let new_folder_button = gtk::Button::with_label("新增目录");
     let edit_button = gtk::Button::with_label("编辑");
@@ -799,16 +799,71 @@ pub fn show() {
         {
             view.selection().select_path(&path);
         }
-        if selected_is_folder_for_context_menu
+        let is_folder = selected_is_folder_for_context_menu
             .lock()
             .unwrap()
-            .unwrap_or(true)
-        {
-            return gtk::glib::Propagation::Proceed;
-        }
+            .unwrap_or(true);
         let Some(id) = selected_id_for_context_menu.lock().unwrap().clone() else {
             return gtk::glib::Propagation::Proceed;
         };
+
+        if is_folder {
+            let menu = gtk::Menu::new();
+            let item = gtk::MenuItem::with_label("新增片段");
+            let refresh = refresh_for_context_menu.clone();
+            item.connect_activate(move |_| {
+                let folder_data: Vec<(String, String)> = crate::app::MANAGER
+                    .get()
+                    .and_then(|manager| manager.lock().ok())
+                    .and_then(|manager| {
+                        manager
+                            .with_store(|store| {
+                                store
+                                    .list()
+                                    .iter()
+                                    .filter(|snippet| {
+                                        !snippet.deleted
+                                            && snippet.snippet_type == SnippetType::Folder
+                                    })
+                                    .map(|snippet| (snippet.id.clone(), snippet.name.clone()))
+                                    .collect()
+                            })
+                            .ok()
+                    })
+                    .unwrap_or_default();
+                if let Some((name, content, parent_id)) =
+                    show_create_snippet_dialog(&folder_data, Some(&id))
+                {
+                    if let Some(manager) = crate::app::MANAGER
+                        .get()
+                        .and_then(|manager| manager.lock().ok())
+                    {
+                        if manager
+                            .with_store_mut(|store| {
+                                store.add(crate::snippet::model::Snippet::new_snippet(
+                                    name.clone(),
+                                    content,
+                                    parent_id,
+                                ))
+                            })
+                            .is_ok()
+                        {
+                            manager.schedule_push();
+                            let _ = notify_rust::Notification::new()
+                                .summary("片段已创建")
+                                .body(&format!("'{}' 已保存", name))
+                                .show();
+                        }
+                    }
+                }
+                refresh(None, Some(id.clone()));
+            });
+            menu.append(&item);
+            menu.show_all();
+            menu.popup_easy(event.button(), event.time());
+            return gtk::glib::Propagation::Stop;
+        }
+
         let favorite = *selected_favorite_for_context_menu.lock().unwrap();
         let menu = gtk::Menu::new();
         let item = gtk::MenuItem::with_label(if favorite { "取消收藏" } else { "收藏" });
@@ -1013,7 +1068,7 @@ pub fn show() {
                 } else {
                     manager.schedule_push();
                     let _ = notify_rust::Notification::new()
-                        .summary("Snippet 已创建")
+                        .summary("片段已创建")
                         .body(&format!("'{}' 已保存", name))
                         .show();
                 }
@@ -1299,6 +1354,10 @@ pub fn show() {
         }
     });
 
+    let search_entry_for_initial_focus = entry.clone();
+    window.connect_map(move |_| {
+        search_entry_for_initial_focus.grab_focus();
+    });
     window.show_all();
     if window_state.maximized {
         window.maximize();
