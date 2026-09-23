@@ -10,10 +10,58 @@ use gtk::{
 };
 use libappindicator::{AppIndicator, AppIndicatorStatus};
 use notify_rust::Notification;
+use std::cell::RefCell;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 static JSON_DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    static JSON_DIALOG: RefCell<Option<Dialog>> = RefCell::new(None);
+}
+
+fn present_existing_json_dialog() -> bool {
+    JSON_DIALOG.with(|slot| {
+        if let Some(dialog) = slot.borrow().as_ref() {
+            dialog.show();
+            glib::idle_add_local_once(|| activate_window_by_title("JSON 格式化"));
+            true
+        } else {
+            false
+        }
+    })
+}
+
+fn activate_window_by_title(title: &str) {
+    // Do not use GTK's `present()` here: on GNOME it emits a timestamp-less
+    // activation request that produces an unwanted "ready" notification.
+    // The lookup and activation must also stay off GTK's event thread.
+    let title = title.to_owned();
+    std::thread::spawn(move || {
+        let window_id = Command::new("xdotool")
+            .args(["search", "--onlyvisible", "--name", &title])
+            .output()
+            .ok()
+            .and_then(|output| {
+                output
+                    .status
+                    .success()
+                    .then_some(output.stdout)
+                    .and_then(|stdout| std::str::from_utf8(&stdout).ok().map(str::to_owned))
+            })
+            .and_then(|output| {
+                output.lines().rev().find_map(|line| {
+                    line.trim().parse::<u64>().ok().filter(|id| *id > 0)
+                })
+            });
+
+        if let Some(window_id) = window_id {
+            let _ = Command::new("xdotool")
+                .args(["windowactivate", &window_id.to_string()])
+                .status();
+        }
+    });
+}
 
 fn reset_json_dialog_open() {
     JSON_DIALOG_OPEN.store(false, Ordering::SeqCst);
@@ -87,11 +135,15 @@ fn copy_time(format: &str) {
 }
 
 fn show_json_formatter() {
-    if JSON_DIALOG_OPEN.swap(true, Ordering::SeqCst) {
+    if present_existing_json_dialog() {
         return;
+    }
+    if JSON_DIALOG_OPEN.swap(true, Ordering::SeqCst) {
+        JSON_DIALOG_OPEN.store(false, Ordering::SeqCst);
     }
 
     let dialog = Dialog::new();
+    JSON_DIALOG.with(|slot| *slot.borrow_mut() = Some(dialog.clone()));
     dialog.set_title("JSON 格式化");
     dialog.set_type_hint(json_formatter_window_type_hint());
     dialog.set_default_size(900, 600);
@@ -103,6 +155,7 @@ fn show_json_formatter() {
         glib::Propagation::Proceed
     });
     dialog.connect_destroy(|_| {
+        JSON_DIALOG.with(|slot| slot.borrow_mut().take());
         reset_json_dialog_open();
     });
 

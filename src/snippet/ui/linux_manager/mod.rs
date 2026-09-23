@@ -3,12 +3,70 @@ mod transfer;
 mod tree;
 
 use gtk::prelude::WidgetExt;
+use std::cell::RefCell;
 use std::process::Command;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 static DRAG_DATA: Mutex<Option<String>> = Mutex::new(None);
 static DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
+
+struct SnippetWindow {
+    window: gtk::Window,
+    search_entry: gtk::SearchEntry,
+    target_window: Rc<RefCell<Option<u64>>>,
+}
+
+thread_local! {
+    static SNIPPET_WINDOW: RefCell<Option<SnippetWindow>> = RefCell::new(None);
+}
+
+fn present_existing_window() -> bool {
+    use gtk::prelude::*;
+
+    SNIPPET_WINDOW.with(|slot| {
+        if let Some(snippet_window) = slot.borrow().as_ref() {
+            if !snippet_window.window.is_active() {
+                *snippet_window.target_window.borrow_mut() = capture_active_window();
+            }
+            snippet_window.window.show();
+            snippet_window.search_entry.grab_focus();
+            let title = snippet_dialog_title().to_string();
+            gtk::glib::idle_add_local_once(move || activate_window_by_title(&title));
+            true
+        } else {
+            false
+        }
+    })
+}
+
+fn activate_window_by_title(title: &str) {
+    // `windowactivate --sync` waits for the window manager.  Calling it from
+    // GTK's event thread can deadlock the UI while the manager is processing
+    // the same activation request, so resolve and activate in a worker.
+    let title = title.to_owned();
+    std::thread::spawn(move || {
+        let window_id = Command::new("xdotool")
+            .args(["search", "--onlyvisible", "--name", &title])
+            .output()
+            .ok()
+            .and_then(|output| {
+                output
+                    .status
+                    .success()
+                    .then_some(output.stdout)
+                    .and_then(|stdout| std::str::from_utf8(&stdout).ok().map(str::to_owned))
+            })
+            .and_then(|output| output.lines().rev().find_map(parse_window_id));
+
+        if let Some(window_id) = window_id {
+            let _ = Command::new("xdotool")
+                .args(["windowactivate", &window_id.to_string()])
+                .status();
+        }
+    });
+}
 
 fn run_mutation_then_refresh<T>(manager: &Mutex<T>, mutation: impl FnOnce(&T) -> bool) -> bool {
     manager
@@ -71,7 +129,7 @@ fn favorite_toggle_label(favorite: bool) -> &'static str {
 fn refresh_favorite_box(
     favorite_box: &gtk::FlowBox,
     dialog: &gtk::Window,
-    target_window: Option<u64>,
+    target_window: &Rc<RefCell<Option<u64>>>,
 ) {
     use crate::snippet::model::SnippetType;
     use gtk::prelude::*;
@@ -102,13 +160,20 @@ fn refresh_favorite_box(
         let content = favorite.content.unwrap_or_default();
         let name = favorite.name;
         let dialog_for_copy = dialog.clone();
+        let target_window_for_copy = target_window.clone();
         button.connect_clicked(move |_| {
-            copy_and_paste_snippet(&dialog_for_copy, &content, &name, target_window);
+            copy_and_paste_snippet(
+                &dialog_for_copy,
+                &content,
+                &name,
+                *target_window_for_copy.borrow(),
+            );
         });
 
         let id = favorite.id;
         let favorite_box_for_remove = favorite_box.clone();
         let dialog_for_remove = dialog.clone();
+        let target_window_for_remove = Rc::clone(target_window);
         button.add_events(gtk::gdk::EventMask::BUTTON_PRESS_MASK);
         button.connect_button_press_event(move |_, event| {
             if event.button() != 3 {
@@ -119,6 +184,7 @@ fn refresh_favorite_box(
             let id = id.clone();
             let favorite_box = favorite_box_for_remove.clone();
             let dialog = dialog_for_remove.clone();
+            let target_window = target_window_for_remove.clone();
             remove.connect_activate(move |_| {
                 let changed = crate::app::MANAGER
                     .get()
@@ -137,7 +203,7 @@ fn refresh_favorite_box(
                     })
                     .unwrap_or(false);
                 if changed {
-                    refresh_favorite_box(&favorite_box, &dialog, target_window);
+                    refresh_favorite_box(&favorite_box, &dialog, &target_window);
                 }
             });
             menu.append(&remove);
@@ -296,14 +362,17 @@ pub fn snippet_dialog_title() -> &'static str {
 
 #[cfg(target_os = "linux")]
 pub fn show() {
-    if DIALOG_OPEN.swap(true, Ordering::SeqCst) {
+    if present_existing_window() {
         return;
+    }
+    if DIALOG_OPEN.swap(true, Ordering::SeqCst) {
+        DIALOG_OPEN.store(false, Ordering::SeqCst);
     }
     use crate::snippet::model::SnippetType;
     use gtk::prelude::*;
 
     let window_state = crate::snippet::config::SnippetWindowState::load().unwrap_or_default();
-    let target_window = capture_active_window();
+    let target_window = Rc::new(RefCell::new(capture_active_window()));
     let window = gtk::Window::new(gtk::WindowType::Toplevel);
     window.set_title(snippet_dialog_title());
     window.set_type_hint(snippet_window_type_hint());
@@ -328,6 +397,13 @@ pub fn show() {
     let entry = gtk::SearchEntry::new();
     entry.set_placeholder_text(Some("搜索片段..."));
     entry.set_margin_bottom(6);
+    SNIPPET_WINDOW.with(|slot| {
+        *slot.borrow_mut() = Some(SnippetWindow {
+            window: window.clone(),
+            search_entry: entry.clone(),
+            target_window: target_window.clone(),
+        });
+    });
     vbox.pack_start(&entry, false, true, 4);
 
     let favorite_box = gtk::FlowBox::new();
@@ -365,7 +441,7 @@ pub fn show() {
         .iter()
         .filter(|s| !s.deleted && s.snippet_type == SnippetType::Snippet)
         .collect();
-    refresh_favorite_box(&favorite_box, &window, target_window);
+    refresh_favorite_box(&favorite_box, &window, &target_window);
 
     eprintln!("[DEBUG] folders count: {}", folders.len());
     eprintln!("[DEBUG] all_snippets count: {}", all_snippets.len());
@@ -390,8 +466,9 @@ pub fn show() {
         let tree_view = tree_view.clone();
         let favorite_box = favorite_box.clone();
         let dialog = window.clone();
+        let target_window = target_window.clone();
         move |query: Option<String>, select_id: Option<String>| {
-            refresh_favorite_box(&favorite_box, &dialog, target_window);
+            refresh_favorite_box(&favorite_box, &dialog, &target_window);
             store.clear();
             let snippets = match crate::app::MANAGER.get().and_then(|m| m.lock().ok()) {
                 Some(guard) => guard.with_store(|s| s.list().to_vec()).unwrap_or_default(),
@@ -790,6 +867,9 @@ pub fn show() {
     let selected_favorite_for_context_menu = selected_favorite.clone();
     let favorite_button_for_context_menu = favorite_button.clone();
     let refresh_for_context_menu = refresh_tree_store.clone();
+    let edit_button_for_context_menu = edit_button.clone();
+    let delete_button_for_context_menu = delete_button.clone();
+    let copy_button_for_context_menu = copy_button.clone();
     tree_view.connect_button_press_event(move |view, event| {
         if event.button() != 3 {
             return gtk::glib::Propagation::Proceed;
@@ -809,9 +889,10 @@ pub fn show() {
 
         if is_folder {
             let menu = gtk::Menu::new();
-            let item = gtk::MenuItem::with_label("新增片段");
+            let new_item = gtk::MenuItem::with_label("新增片段");
             let refresh = refresh_for_context_menu.clone();
-            item.connect_activate(move |_| {
+            let folder_id = id.clone();
+            new_item.connect_activate(move |_| {
                 let folder_data: Vec<(String, String)> = crate::app::MANAGER
                     .get()
                     .and_then(|manager| manager.lock().ok())
@@ -832,7 +913,7 @@ pub fn show() {
                     })
                     .unwrap_or_default();
                 if let Some((name, content, parent_id)) =
-                    show_create_snippet_dialog(&folder_data, Some(&id))
+                    show_create_snippet_dialog(&folder_data, Some(&folder_id))
                 {
                     if let Some(manager) = crate::app::MANAGER
                         .get()
@@ -856,9 +937,19 @@ pub fn show() {
                         }
                     }
                 }
-                refresh(None, Some(id.clone()));
+                refresh(None, Some(folder_id.clone()));
             });
-            menu.append(&item);
+            menu.append(&new_item);
+
+            let edit_item = gtk::MenuItem::with_label("编辑");
+            let edit_button = edit_button_for_context_menu.clone();
+            edit_item.connect_activate(move |_| edit_button.clicked());
+            menu.append(&edit_item);
+
+            let delete_item = gtk::MenuItem::with_label("删除");
+            let delete_button = delete_button_for_context_menu.clone();
+            delete_item.connect_activate(move |_| delete_button.clicked());
+            menu.append(&delete_item);
             menu.show_all();
             menu.popup_easy(event.button(), event.time());
             return gtk::glib::Propagation::Stop;
@@ -870,13 +961,14 @@ pub fn show() {
         let selected_favorite = selected_favorite_for_context_menu.clone();
         let button = favorite_button_for_context_menu.clone();
         let refresh = refresh_for_context_menu.clone();
+        let favorite_id = id.clone();
         item.connect_activate(move |_| {
             let changed = crate::app::MANAGER
                 .get()
                 .map(|manager| {
                     run_mutation_then_refresh(manager, |manager| {
                         if manager
-                            .with_store_mut(|store| store.set_favorite(&id, !favorite))
+                            .with_store_mut(|store| store.set_favorite(&favorite_id, !favorite))
                             .is_ok()
                         {
                             manager.schedule_push();
@@ -891,17 +983,32 @@ pub fn show() {
                 *selected_favorite.lock().unwrap() = !favorite;
                 button.set_label(favorite_toggle_label(!favorite));
                 button.set_tooltip_text(Some(if !favorite { "取消收藏" } else { "收藏" }));
-                refresh(None, Some(id.clone()));
+                refresh(None, Some(favorite_id.clone()));
             }
         });
         menu.append(&item);
+
+        let edit_item = gtk::MenuItem::with_label("编辑");
+        let edit_button = edit_button_for_context_menu.clone();
+        edit_item.connect_activate(move |_| edit_button.clicked());
+        menu.append(&edit_item);
+
+        let delete_item = gtk::MenuItem::with_label("删除");
+        let delete_button = delete_button_for_context_menu.clone();
+        delete_item.connect_activate(move |_| delete_button.clicked());
+        menu.append(&delete_item);
+
+        let copy_item = gtk::MenuItem::with_label("复制");
+        let copy_button = copy_button_for_context_menu.clone();
+        copy_item.connect_activate(move |_| copy_button.clicked());
+        menu.append(&copy_item);
         menu.show_all();
         menu.popup_easy(event.button(), event.time());
         gtk::glib::Propagation::Stop
     });
 
     let dialog_for_dblclick = window.clone();
-    let target_window_for_dblclick = target_window;
+    let target_window_for_dblclick = target_window.clone();
     tree_view.connect_row_activated(move |tv, path, _col| {
         if let Some(model) = tv.model() {
             if let Some(ts) = model.downcast_ref::<gtk::TreeStore>() {
@@ -922,7 +1029,7 @@ pub fn show() {
                                 &dialog_for_dblclick,
                                 &content,
                                 &name,
-                                target_window_for_dblclick,
+                                *target_window_for_dblclick.borrow(),
                             );
                         }
                     }
@@ -932,12 +1039,17 @@ pub fn show() {
     });
 
     let dialog_for_copy = window.clone();
-    let target_window_for_copy = target_window;
+    let target_window_for_copy = target_window.clone();
     let sc_for_copy = selected_content.clone();
     copy_button.connect_clicked(move |_| {
         let content = sc_for_copy.lock().unwrap().clone();
         if let Some(c) = content {
-            copy_and_paste_snippet(&dialog_for_copy, &c, &c, target_window_for_copy);
+            copy_and_paste_snippet(
+                &dialog_for_copy,
+                &c,
+                &c,
+                *target_window_for_copy.borrow(),
+            );
         }
     });
 
@@ -1347,7 +1459,6 @@ pub fn show() {
         if is_escape_key(&key_name) {
             persist_snippet_window_state(&window_for_escape, true);
             window_for_escape.hide();
-            DIALOG_OPEN.store(false, Ordering::SeqCst);
             gtk::glib::Propagation::Stop
         } else {
             gtk::glib::Propagation::Proceed
@@ -1367,14 +1478,15 @@ pub fn show() {
     close_button.connect_clicked(move |_| {
         persist_snippet_window_state(&window_for_close, true);
         window_for_close.hide();
-        DIALOG_OPEN.store(false, Ordering::SeqCst);
     });
 
-    let window_for_delete_event = window.clone();
+    window.connect_destroy(|_| {
+        SNIPPET_WINDOW.with(|slot| slot.borrow_mut().take());
+        DIALOG_OPEN.store(false, Ordering::SeqCst);
+    });
     window.connect_delete_event(move |window, _| {
         persist_snippet_window_state(window, true);
         window.hide();
-        DIALOG_OPEN.store(false, Ordering::SeqCst);
         gtk::glib::Propagation::Stop
     });
 }

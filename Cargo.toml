@@ -1,6 +1,6 @@
 [package]
 name = "copy-time-tray"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "跨平台托盘时钟 - 点击复制时间到剪贴板"
 
