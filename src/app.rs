@@ -10,8 +10,6 @@ use std::cell::RefCell;
 #[cfg(target_os = "windows")]
 use std::sync::Arc;
 
-#[cfg(target_os = "windows")]
-use crate::snippet::ui::search::SearchPopup;
 pub use crate::snippet::ui::{UiCommand, UiResponse};
 
 pub static MANAGER: OnceLock<Mutex<SnippetManager>> = OnceLock::new();
@@ -42,6 +40,10 @@ pub fn run() {
     let (resp_tx, resp_rx) = crossbeam_channel::unbounded::<UiResponse>();
     #[cfg(target_os = "windows")]
     let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    #[cfg(target_os = "windows")]
+    let gui_available = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    #[cfg(target_os = "windows")]
+    let (config_apply_tx, config_apply_rx) = crossbeam_channel::unbounded();
 
     match SnippetManager::new() {
         Ok(manager) => {
@@ -57,12 +59,21 @@ pub fn run() {
     }
 
     #[cfg(target_os = "windows")]
-    {
+    let ui_thread = {
         let _ = CMD_TX.set(cmd_tx.clone());
         let response_sender = resp_tx.clone();
         let running_for_ui = running.clone();
-        std::thread::spawn(move || launch_egui(cmd_rx, response_sender, running_for_ui));
-    }
+        let gui_available_for_ui = gui_available.clone();
+        std::thread::spawn(move || {
+            launch_egui(
+                cmd_rx,
+                response_sender,
+                running_for_ui,
+                config_apply_tx,
+                gui_available_for_ui,
+            )
+        })
+    };
 
     if let Err(error) = launch_global_hotkey(cmd_tx.clone()) {
         let _ = notify_rust::Notification::new()
@@ -76,7 +87,12 @@ pub fn run() {
     #[cfg(target_os = "linux")]
     platform::linux::main(cmd_tx, cmd_rx);
     #[cfg(target_os = "windows")]
-    platform::windows::main(cmd_tx, running);
+    {
+        platform::windows::main(cmd_tx, running, config_apply_rx, gui_available);
+        if let Err(error) = ui_thread.join() {
+            eprintln!("[ERROR] Windows GUI thread panicked: {error:?}");
+        }
+    }
 }
 
 fn broadcast_refresh(
@@ -335,42 +351,73 @@ fn launch_egui(
     cmd_rx: crossbeam_channel::Receiver<UiCommand>,
     resp_tx: crossbeam_channel::Sender<UiResponse>,
     running: Arc<std::sync::atomic::AtomicBool>,
+    config_apply_tx: crossbeam_channel::Sender<crate::platform::windows::ConfigApplyRequest>,
+    gui_available: Arc<std::sync::atomic::AtomicBool>,
 ) {
-    let popup_tx = Arc::new(Mutex::new(None::<crossbeam_channel::Sender<UiCommand>>));
-    let popup_tx_clone = popup_tx.clone();
-    std::thread::spawn(move || {
-        while let Ok(command) = cmd_rx.recv() {
-            if matches!(command, UiCommand::ShowJson) {
-                crate::platform::windows::launch_json_formatter();
-            } else if let Some(sender) = popup_tx_clone.lock().unwrap().as_ref() {
-                let _ = sender.send(command);
-            }
+    let native_options = crate::platform::windows::desktop_native_options();
+    let desktop = crate::platform::windows::WindowsUiApp::new(
+        cmd_rx,
+        resp_tx,
+        running.clone(),
+        config_apply_tx,
+    );
+    let result = eframe::run_native(
+        "Copy Time Tray - Snippet",
+        native_options,
+        Box::new(|_| Ok(Box::new(desktop))),
+    )
+    .map_err(|error| error.to_string());
+    finish_windows_gui(result, &running, &gui_available);
+}
+
+#[cfg(target_os = "windows")]
+fn finish_windows_gui(
+    result: Result<(), String>,
+    running: &std::sync::atomic::AtomicBool,
+    gui_available: &std::sync::atomic::AtomicBool,
+) {
+    match result {
+        Ok(()) => running.store(false, Ordering::SeqCst),
+        Err(error) => {
+            eprintln!("[ERROR] Windows GUI initialization failed: {error}");
+            eprintln!("[WARN] Continuing in basic tray mode; snippets, JSON and settings windows are unavailable. Restart after fixing the graphics environment.");
+            gui_available.store(false, Ordering::Release);
         }
-    });
-    while running.load(std::sync::atomic::Ordering::Relaxed) {
-        let (popup_sender, popup_receiver) = crossbeam_channel::unbounded::<UiCommand>();
-        *popup_tx.lock().unwrap() = Some(popup_sender);
-        let search = SearchPopup::new(popup_receiver, resp_tx.clone());
-        let window_state = crate::snippet::config::SnippetWindowState::load().unwrap_or_default();
-        let mut viewport = egui::ViewportBuilder::default()
-            .with_inner_size([window_state.width as f32, window_state.height as f32])
-            .with_min_inner_size([600.0, 400.0])
-            .with_title("代码片段")
-            .with_resizable(true)
-            .with_maximize_button(true)
-            .with_maximized(window_state.maximized)
-            .with_visible(false);
-        if let (Some(x), Some(y)) = (window_state.x, window_state.y) {
-            viewport = viewport.with_position([x as f32, y as f32]);
-        }
-        let native_options = eframe::NativeOptions {
-            viewport,
-            ..Default::default()
-        };
-        let _ = eframe::run_native(
-            "Copy Time Tray - Snippet",
-            native_options,
-            Box::new(|_| Ok(Box::new(search))),
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_gui_tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn gui_failure_keeps_native_tray_running() {
+        let running = AtomicBool::new(true);
+        let gui_available = AtomicBool::new(true);
+        finish_windows_gui(
+            Err("egui_glow requires opengl 2.0+".into()),
+            &running,
+            &gui_available,
         );
+        assert!(running.load(Ordering::SeqCst));
+        assert!(!gui_available.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn normal_gui_exit_stops_native_tray() {
+        let running = AtomicBool::new(true);
+        let gui_available = AtomicBool::new(true);
+        finish_windows_gui(Ok(()), &running, &gui_available);
+        assert!(!running.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn gui_failure_does_not_restart_an_exiting_tray() {
+        let running = AtomicBool::new(false);
+        let gui_available = AtomicBool::new(true);
+        finish_windows_gui(Err("graphics unavailable".into()), &running, &gui_available);
+        assert!(!running.load(Ordering::SeqCst));
+        assert!(!gui_available.load(Ordering::Acquire));
     }
 }

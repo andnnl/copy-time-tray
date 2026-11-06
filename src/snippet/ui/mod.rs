@@ -16,6 +16,8 @@ pub mod tabs;
 pub enum UiCommand {
     Show,
     ShowJson,
+    #[cfg(target_os = "windows")]
+    ShowConfig,
     Hide,
     CopyToClipboard(String),
     RefreshSnippets(Vec<Snippet>),

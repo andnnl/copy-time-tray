@@ -8,6 +8,8 @@ use crate::json_formatter::{
 };
 use crate::menu_order::{windows_menu_order, MenuEntry};
 use crate::snippet::config::Config;
+use crate::snippet::ui::search::SearchPopup;
+use crate::snippet::ui::UiResponse;
 use crate::utilities::{generate_md5, generate_password, get_time_text};
 use arboard::Clipboard;
 use eframe::egui;
@@ -19,6 +21,57 @@ use std::sync::Arc;
 use std::time::Duration;
 use tray_icon::{TrayIcon, TrayIconBuilder};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LWIN, VK_RWIN};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    DispatchMessageW, MsgWaitForMultipleObjectsEx, PeekMessageW, TranslateMessage, MSG,
+    MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, WM_QUIT,
+};
+
+#[cfg(test)]
+mod desktop_tests;
+
+pub(crate) fn worker_native_options(viewport: egui::ViewportBuilder) -> eframe::NativeOptions {
+    use winit::platform::windows::EventLoopBuilderExtWindows;
+
+    eframe::NativeOptions {
+        viewport,
+        event_loop_builder: Some(Box::new(|builder| {
+            builder.with_any_thread(true);
+        })),
+        ..Default::default()
+    }
+}
+
+pub(crate) fn desktop_native_options() -> eframe::NativeOptions {
+    let mut options = worker_native_options(
+        egui::ViewportBuilder::default()
+            .with_title("Copy Time Tray")
+            .with_inner_size([1.0, 1.0])
+            .with_min_inner_size([1.0, 1.0])
+            .with_position([-10000.0, -10000.0])
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_taskbar(false)
+            .with_transparent(true)
+            .with_mouse_passthrough(true),
+    );
+    options.persist_window = false;
+    options
+}
+
+fn snippet_viewport() -> egui::ViewportBuilder {
+    let state = crate::snippet::config::SnippetWindowState::load().unwrap_or_default();
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("代码片段")
+        .with_inner_size([state.width as f32, state.height as f32])
+        .with_min_inner_size([600.0, 400.0])
+        .with_resizable(true)
+        .with_maximize_button(true)
+        .with_maximized(state.maximized);
+    if let (Some(x), Some(y)) = (state.x, state.y) {
+        viewport = viewport.with_position([x as f32, y as f32]);
+    }
+    viewport
+}
 
 fn copy_to_clipboard(text: &str) {
     if let Ok(mut clipboard) = Clipboard::new() {
@@ -134,39 +187,6 @@ fn numbered_text_editor(ui: &mut egui::Ui, text: &mut String, interactive: bool,
         });
 }
 
-static JSON_WINDOW_OPEN: AtomicBool = AtomicBool::new(false);
-
-struct JsonWindowGuard;
-
-impl Drop for JsonWindowGuard {
-    fn drop(&mut self) {
-        JSON_WINDOW_OPEN.store(false, Ordering::SeqCst);
-    }
-}
-
-pub(crate) fn launch_json_formatter() {
-    if JSON_WINDOW_OPEN
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return;
-    }
-    std::thread::spawn(|| {
-        let _guard = JsonWindowGuard;
-        let native_options = eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default()
-                .with_inner_size([1000.0, 700.0])
-                .with_min_inner_size([600.0, json_formatter_min_window_height()]),
-            ..Default::default()
-        };
-        let _ = eframe::run_native(
-            "JSON 格式化工具",
-            native_options,
-            Box::new(|_cc| Ok(Box::new(JsonFormatterApp::default()))),
-        );
-    });
-}
-
 impl eframe::App for JsonFormatterApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -224,17 +244,7 @@ impl eframe::App for JsonFormatterApp {
     }
 }
 
-type ConfigApplyRequest = (Config, crossbeam_channel::Sender<Result<(), String>>);
-
-static CONFIG_WINDOW_OPEN: AtomicBool = AtomicBool::new(false);
-
-struct ConfigWindowGuard;
-
-impl Drop for ConfigWindowGuard {
-    fn drop(&mut self) {
-        CONFIG_WINDOW_OPEN.store(false, Ordering::SeqCst);
-    }
-}
+pub(crate) type ConfigApplyRequest = (Config, crossbeam_channel::Sender<Result<(), String>>);
 
 struct HotkeySettingsApp {
     config: Config,
@@ -375,55 +385,177 @@ fn shortcut_setting_ui(ui: &mut egui::Ui, label: &str, state: &mut HotkeySetting
     }
 }
 
-fn launch_hotkey_settings(apply_tx: crossbeam_channel::Sender<ConfigApplyRequest>) {
-    if CONFIG_WINDOW_OPEN
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return;
+pub(crate) struct WindowsUiApp {
+    search: SearchPopup,
+    search_tx: crossbeam_channel::Sender<UiCommand>,
+    cmd_rx: crossbeam_channel::Receiver<UiCommand>,
+    config_apply_tx: crossbeam_channel::Sender<ConfigApplyRequest>,
+    running: Arc<AtomicBool>,
+    json: Option<JsonFormatterApp>,
+    settings: Option<HotkeySettingsApp>,
+    focus_json: bool,
+    focus_settings: bool,
+    show_snippets: bool,
+    snippet_viewport: egui::ViewportBuilder,
+    pending_refresh: Option<Vec<crate::snippet::model::Snippet>>,
+}
+
+impl WindowsUiApp {
+    pub(crate) fn new(
+        cmd_rx: crossbeam_channel::Receiver<UiCommand>,
+        resp_tx: crossbeam_channel::Sender<UiResponse>,
+        running: Arc<AtomicBool>,
+        config_apply_tx: crossbeam_channel::Sender<ConfigApplyRequest>,
+    ) -> Self {
+        let (search_tx, search_rx) = crossbeam_channel::unbounded();
+        Self {
+            search: SearchPopup::new(search_rx, resp_tx),
+            search_tx,
+            cmd_rx,
+            config_apply_tx,
+            running,
+            json: None,
+            settings: None,
+            focus_json: false,
+            focus_settings: false,
+            show_snippets: false,
+            snippet_viewport: snippet_viewport(),
+            pending_refresh: None,
+        }
     }
-    std::thread::spawn(move || {
-        let _guard = ConfigWindowGuard;
-        let config = Config::load().unwrap_or_default();
-        let snippet_current = match config.general.snippet_hotkey.parse::<Shortcut>() {
-            Ok(shortcut) => shortcut,
-            Err(error) => {
-                let _ = Notification::new()
-                    .summary("代码片段快捷键配置无效")
-                    .body(&error.to_string())
-                    .show();
-                return;
+
+    fn open_settings(&mut self) -> Result<(), String> {
+        if self.settings.is_none() {
+            let config = Config::load().unwrap_or_default();
+            let snippet_current = config
+                .general
+                .snippet_hotkey
+                .parse::<Shortcut>()
+                .map_err(|error| format!("代码片段快捷键配置无效: {error}"))?;
+            let json_current = config
+                .general
+                .json_hotkey
+                .parse::<Shortcut>()
+                .map_err(|error| format!("JSON 快捷键配置无效: {error}"))?;
+            self.settings = Some(HotkeySettingsApp::new(
+                config,
+                snippet_current,
+                json_current,
+                self.config_apply_tx.clone(),
+            ));
+        }
+        self.focus_settings = true;
+        Ok(())
+    }
+
+    fn process_commands(&mut self) {
+        while let Ok(command) = self.cmd_rx.try_recv() {
+            match command {
+                UiCommand::Show => {
+                    if !self.show_snippets {
+                        self.snippet_viewport = snippet_viewport();
+                    }
+                    self.show_snippets = true;
+                    let _ = self.search_tx.send(UiCommand::Show);
+                }
+                UiCommand::RefreshSnippets(snippets) => {
+                    self.pending_refresh = Some(snippets);
+                }
+                UiCommand::ShowJson => {
+                    self.json.get_or_insert_with(JsonFormatterApp::default);
+                    self.focus_json = true;
+                }
+                UiCommand::ShowConfig => {
+                    if let Err(error) = self.open_settings() {
+                        eprintln!("[ERROR] {error}");
+                        let _ = Notification::new()
+                            .summary("无法打开配置")
+                            .body(&error)
+                            .show();
+                    }
+                }
+                command => {
+                    let _ = self.search_tx.send(command);
+                }
             }
-        };
-        let json_current = match config.general.json_hotkey.parse::<Shortcut>() {
-            Ok(shortcut) => shortcut,
-            Err(error) => {
-                let _ = Notification::new()
-                    .summary("JSON 快捷键配置无效")
-                    .body(&error.to_string())
-                    .show();
-                return;
+        }
+    }
+}
+
+impl eframe::App for WindowsUiApp {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0; 4]
+    }
+
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if !self.running.load(Ordering::SeqCst) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        self.process_commands();
+        ctx.request_repaint_after(Duration::from_millis(100));
+        if self.show_snippets {
+            if let Some(snippets) = self.pending_refresh.take() {
+                let _ = self.search_tx.send(UiCommand::RefreshSnippets(snippets));
             }
-        };
-        let native_options = eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default()
-                .with_inner_size([500.0, 460.0])
-                .with_resizable(false),
-            ..Default::default()
-        };
-        let _ = eframe::run_native(
-            "Copy Time Tray - 配置",
-            native_options,
-            Box::new(move |_cc| {
-                Ok(Box::new(HotkeySettingsApp::new(
-                    config,
-                    snippet_current,
-                    json_current,
-                    apply_tx,
-                )))
-            }),
-        );
-    });
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("snippets"),
+                self.snippet_viewport.clone(),
+                |ctx, _class| self.search.update(ctx, frame),
+            );
+            self.show_snippets = self.search.is_visible();
+        }
+
+        if let Some(json) = self.json.as_mut() {
+            let focus = std::mem::take(&mut self.focus_json);
+            let mut close = false;
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("json_formatter"),
+                egui::ViewportBuilder::default()
+                    .with_title("JSON 格式化工具")
+                    .with_inner_size([1000.0, 700.0])
+                    .with_min_inner_size([600.0, json_formatter_min_window_height()]),
+                |ctx, _class| {
+                    if ctx.input(|input| input.viewport().close_requested()) {
+                        close = true;
+                    } else {
+                        if focus {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                        }
+                        json.update(ctx, frame);
+                    }
+                },
+            );
+            if close {
+                self.json = None;
+            }
+        }
+
+        if let Some(settings) = self.settings.as_mut() {
+            let focus = std::mem::take(&mut self.focus_settings);
+            let mut close = false;
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("hotkey_settings"),
+                egui::ViewportBuilder::default()
+                    .with_title("Copy Time Tray - 配置")
+                    .with_inner_size([500.0, 460.0])
+                    .with_resizable(false),
+                |ctx, _class| {
+                    if ctx.input(|input| input.viewport().close_requested()) {
+                        close = true;
+                    } else {
+                        if focus {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                        }
+                        settings.update(ctx, frame);
+                    }
+                },
+            );
+            if close {
+                self.settings = None;
+            }
+        }
+    }
 }
 
 fn capture_from_egui(
@@ -562,9 +694,10 @@ fn create_icon_rgba() -> Vec<u8> {
 pub fn main(
     cmd_tx: crossbeam_channel::Sender<UiCommand>,
     running: Arc<std::sync::atomic::AtomicBool>,
+    config_apply_rx: crossbeam_channel::Receiver<ConfigApplyRequest>,
+    gui_available: Arc<AtomicBool>,
 ) {
     let menu = Menu::new();
-    let (config_apply_tx, config_apply_rx) = crossbeam_channel::unbounded::<ConfigApplyRequest>();
 
     // 复制时间菜单项
     let full_id = muda::MenuId::new("full");
@@ -624,18 +757,27 @@ pub fn main(
     let icon = image::RgbaImage::from_raw(32, 32, rgba).expect("Failed to create icon");
     let icon = tray_icon::Icon::from_rgba(icon.into_raw(), 32, 32).expect("Failed to create icon");
 
-    let _tray_icon: TrayIcon = TrayIconBuilder::new()
+    let tray_icon: TrayIcon = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_icon(icon)
         .with_tooltip("Copy Time")
         .build()
         .unwrap();
 
-    let running_for_thread = running.clone();
-    let config_apply_tx_for_thread = config_apply_tx.clone();
     let menu_channel = MenuEvent::receiver();
-    std::thread::spawn(move || loop {
-        if let Ok(event) = menu_channel.recv() {
+    let tray_channel = tray_icon::TrayIconEvent::receiver();
+    let mut gui_enabled = true;
+    while running.load(Ordering::SeqCst) {
+        if !dispatch_pending_messages() {
+            running.store(false, Ordering::SeqCst);
+            break;
+        }
+        if gui_enabled && !gui_available.load(Ordering::Acquire) {
+            disable_gui_menu_items(&[&snippet_item, &json_formatter_item, &config_item]);
+            let _ = tray_icon.set_tooltip(Some("Copy Time - 基础托盘模式（图形界面不可用）"));
+            gui_enabled = false;
+        }
+        while let Ok(event) = menu_channel.try_recv() {
             match event.id.0.as_str() {
                 "full" => copy_time("full"),
                 "date" => copy_time("date"),
@@ -651,27 +793,203 @@ pub fn main(
                     let time_text = get_time_text("full");
                     copy_to_clipboard(&generate_md5(&time_text, 32));
                 }
-                "open_config" => {
-                    launch_hotkey_settings(config_apply_tx_for_thread.clone());
+                "open_config" if gui_enabled => {
+                    let _ = cmd_tx.send(UiCommand::ShowConfig);
                 }
-                "search_snippets" => {
+                "search_snippets" if gui_enabled => {
                     send_refresh_to_search();
                     let _ = cmd_tx.send(UiCommand::Show);
                 }
-                "open_json_formatter" => launch_json_formatter(),
+                "open_json_formatter" if gui_enabled => {
+                    let _ = cmd_tx.send(UiCommand::ShowJson);
+                }
                 "quit" => {
-                    running_for_thread.store(false, std::sync::atomic::Ordering::SeqCst);
+                    running.store(false, Ordering::SeqCst);
                 }
                 _ => {}
             }
         }
-    });
-
-    // Windows 保持进程存活，直到收到退出信号
-    while running.load(std::sync::atomic::Ordering::SeqCst) {
+        while tray_channel.try_recv().is_ok() {}
         while let Ok((config, response_tx)) = config_apply_rx.try_recv() {
             let _ = response_tx.send(apply_config_with_hotkey(config));
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        if running.load(Ordering::SeqCst) {
+            unsafe {
+                MsgWaitForMultipleObjectsEx(
+                    0,
+                    std::ptr::null(),
+                    50,
+                    QS_ALLINPUT,
+                    MWMO_INPUTAVAILABLE,
+                );
+            }
+        }
+    }
+}
+
+fn disable_gui_menu_items(items: &[&MenuItem]) {
+    for item in items {
+        item.set_enabled(false);
+        item.set_text(format!("{}（图形界面不可用）", item.text()));
+    }
+}
+
+fn dispatch_pending_messages() -> bool {
+    let mut message: MSG = unsafe { std::mem::zeroed() };
+    while unsafe { PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
+        if message.message == WM_QUIT {
+            return false;
+        }
+        unsafe {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tray_thread_dispatches_native_messages_without_gui() {
+        use windows_sys::Win32::Foundation::HWND;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, KillTimer, SetTimer};
+
+        static TIMER_FIRED: AtomicBool = AtomicBool::new(false);
+        unsafe extern "system" fn timer_callback(
+            window: HWND,
+            _message: u32,
+            timer: usize,
+            _time: u32,
+        ) {
+            KillTimer(window, timer);
+            TIMER_FIRED.store(true, Ordering::SeqCst);
+        }
+
+        let (cmd_tx, _cmd_rx) = crossbeam_channel::unbounded();
+        let (_config_tx, config_rx) = crossbeam_channel::unbounded();
+        let running = Arc::new(AtomicBool::new(true));
+        let running_for_tray = running.clone();
+        let tray_thread = std::thread::spawn(move || {
+            main(
+                cmd_tx,
+                running_for_tray,
+                config_rx,
+                Arc::new(AtomicBool::new(false)),
+            )
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let window = loop {
+            let window = unsafe { FindWindowW(windows_sys::w!("tray_icon_app"), std::ptr::null()) };
+            if !window.is_null() || std::time::Instant::now() >= deadline {
+                break window;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        if !window.is_null() {
+            unsafe { SetTimer(window, 1, 10, Some(timer_callback)) };
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !TIMER_FIRED.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        running.store(false, Ordering::SeqCst);
+        tray_thread.join().unwrap();
+
+        assert!(!window.is_null(), "tray callback window should exist");
+        assert!(
+            TIMER_FIRED.load(Ordering::SeqCst),
+            "tray thread must dispatch queued native messages"
+        );
+    }
+
+    #[test]
+    fn basic_tray_mode_only_disables_gui_menu_items() {
+        let menu = Menu::new();
+        let snippet = MenuItem::new("代码片段", true, None);
+        let json = MenuItem::new("JSON", true, None);
+        let config = MenuItem::new("配置", true, None);
+        let time = MenuItem::new("复制时间", true, None);
+        let password = MenuItem::new("密码", true, None);
+        let md5 = MenuItem::new("MD5", true, None);
+        let quit = MenuItem::new("退出", true, None);
+        for item in [&snippet, &json, &config, &time, &password, &md5, &quit] {
+            menu.append(item).unwrap();
+        }
+
+        disable_gui_menu_items(&[&snippet, &json, &config]);
+
+        for item in [&snippet, &json, &config] {
+            assert!(!item.is_enabled());
+            assert!(item.text().contains("图形界面不可用"));
+        }
+        for item in [&time, &password, &md5, &quit] {
+            assert!(item.is_enabled());
+        }
+    }
+
+    #[test]
+    fn repeated_json_commands_reuse_the_existing_window_state() {
+        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+        let (resp_tx, _resp_rx) = crossbeam_channel::unbounded();
+        let (config_tx, _config_rx) = crossbeam_channel::unbounded();
+        let mut desktop =
+            WindowsUiApp::new(cmd_rx, resp_tx, Arc::new(AtomicBool::new(true)), config_tx);
+        cmd_tx.send(UiCommand::ShowJson).unwrap();
+        desktop.process_commands();
+        desktop.json.as_mut().unwrap().input = "keep my input".to_string();
+        for _ in 0..100 {
+            cmd_tx.send(UiCommand::ShowJson).unwrap();
+        }
+        desktop.process_commands();
+
+        assert_eq!(desktop.json.as_ref().unwrap().input, "keep my input");
+        assert!(desktop.cmd_rx.is_empty());
+        assert!(desktop.focus_json);
+    }
+
+    #[test]
+    fn hidden_snippets_keep_only_the_latest_refresh() {
+        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+        let (resp_tx, _resp_rx) = crossbeam_channel::unbounded();
+        let (config_tx, _config_rx) = crossbeam_channel::unbounded();
+        let mut desktop =
+            WindowsUiApp::new(cmd_rx, resp_tx, Arc::new(AtomicBool::new(true)), config_tx);
+        for revision in 0..100 {
+            cmd_tx
+                .send(UiCommand::RefreshSnippets(vec![
+                    crate::snippet::model::Snippet::new_snippet(
+                        format!("revision {revision}"),
+                        "content".to_string(),
+                        None,
+                    ),
+                ]))
+                .unwrap();
+            desktop.process_commands();
+        }
+
+        assert!(!desktop.show_snippets);
+        let snippets = desktop.pending_refresh.as_ref().unwrap();
+        assert_eq!(snippets.len(), 1);
+        assert_eq!(snippets[0].name, "revision 99");
+        assert!(desktop.cmd_rx.is_empty());
+    }
+
+    #[test]
+    fn worker_native_options_allow_event_loop_on_background_thread() {
+        std::thread::spawn(|| {
+            let mut options = worker_native_options(egui::ViewportBuilder::default());
+            let mut builder = winit::event_loop::EventLoop::with_user_event();
+            if let Some(hook) = options.event_loop_builder.take() {
+                hook(&mut builder);
+            }
+            let _event_loop = builder
+                .build()
+                .expect("worker event loop should initialize");
+        })
+        .join()
+        .expect("worker event loop should not panic");
     }
 }

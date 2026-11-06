@@ -51,6 +51,10 @@ impl Default for SearchPopup {
 }
 
 impl SearchPopup {
+    pub(crate) fn is_visible(&self) -> bool {
+        self.visible
+    }
+
     pub fn new(cmd_receiver: Receiver<UiCommand>, resp_sender: Sender<UiResponse>) -> Self {
         let window_state = crate::snippet::config::SnippetWindowState::load().unwrap_or_default();
         Self {
@@ -59,6 +63,7 @@ impl SearchPopup {
             editor: EditorPopup::new(resp_sender),
             maximized: window_state.maximized,
             last_saved_window_state: Some(window_state),
+            visible: false,
             ..Default::default()
         }
     }
@@ -167,6 +172,12 @@ impl SearchPopup {
     }
 
     fn process_commands(&mut self, ctx: &egui::Context) {
+        if ctx.input(|input| input.viewport().close_requested()) {
+            self.persist_window_state(ctx, true);
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            let action = self.hide_window();
+            Self::apply_window_action(ctx, action);
+        }
         if let Some(rx) = self.cmd_receiver.take() {
             loop {
                 match rx.try_recv() {
@@ -175,6 +186,8 @@ impl SearchPopup {
                         Self::apply_window_action(ctx, action);
                     }
                     Ok(UiCommand::ShowJson) => {}
+                    #[cfg(target_os = "windows")]
+                    Ok(UiCommand::ShowConfig) => {}
                     Ok(UiCommand::Hide) => {
                         self.persist_window_state(ctx, true);
                         let action = self.hide_window();
@@ -192,22 +205,21 @@ impl SearchPopup {
             }
             self.cmd_receiver = Some(rx);
         }
-        if self.visible {
-            ctx.request_repaint();
-        } else {
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        if !self.visible {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
 }
 
 impl eframe::App for SearchPopup {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_commands(ctx);
-        self.persist_window_state(ctx, false);
 
         if !self.visible {
             return;
         }
+        self.persist_window_state(ctx, false);
 
         if self.editor.is_visible() {
             self.editor.update(ctx, _frame);
@@ -408,6 +420,37 @@ impl eframe::App for SearchPopup {
 #[cfg(test)]
 mod tests {
     use super::{SearchPopup, WindowVisibilityAction};
+
+    #[test]
+    fn new_popup_starts_hidden() {
+        let (_cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+        let (resp_tx, _resp_rx) = crossbeam_channel::unbounded();
+        let popup = SearchPopup::new(cmd_rx, resp_tx);
+
+        assert!(!popup.visible);
+    }
+
+    #[test]
+    fn titlebar_close_hides_without_terminating_the_event_loop() {
+        let ctx = egui::Context::default();
+        let mut popup = SearchPopup::default();
+        let mut input = egui::RawInput::default();
+        input
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .unwrap()
+            .events
+            .push(egui::ViewportEvent::Close);
+        let output = ctx.run(input, |ctx| {
+            popup.last_saved_window_state = Some(SearchPopup::current_window_state(ctx));
+            popup.process_commands(ctx);
+        });
+
+        assert!(!popup.visible);
+        let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
+        assert!(commands.contains(&egui::ViewportCommand::CancelClose));
+        assert!(commands.contains(&egui::ViewportCommand::Visible(false)));
+    }
 
     #[test]
     fn show_requests_window_visibility_focus_and_search_focus() {

@@ -772,7 +772,7 @@ dependencies = [
 
 [[package]]
 name = "copy-time-tray"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "arboard",
  "async-channel",
@@ -801,6 +801,7 @@ dependencies = [
  "tray-icon",
  "uuid",
  "windows-sys 0.59.0",
+ "winit",
 ]
 
 [[package]]
